@@ -1,6 +1,5 @@
 import express from "express";
 import fs from "fs";
-import clc from "cli-color";
 import { VIDEOS_DIR } from "../server.js";
 import { downloadVideoController } from "../controllers/downloadController.js";
 import { deleteVideoController } from "../controllers/deleteController.js";
@@ -20,7 +19,7 @@ routes.get("/api/videos-list", (req, res) => {
       .filter((file) => file.endsWith(".mp4"));
     res.json({ videos });
   } catch (error) {
-    logError("✖ Error fetching video list:"), error;
+    logError("Error fetching video list:"), error;
     res.status(500).json({ message: "Failed to retrieve video list" });
   }
 });

@@ -16,23 +16,21 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-
-
 export const SERVER_URL = `https://iot-ads-display.onrender.com`;
-export const RPI_ID = process.env.RPI_ID || `piserver_0002`
+export const RPI_ID = process.env.RPI_ID || `piserver_0002`;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 export const VIDEOS_DIR = path.join(__dirname, "./ads-videos");
 
 export const packageJson = JSON.parse(
-  fs.readFileSync(path.join(__dirname, 'package.json'), 'utf-8')
+  fs.readFileSync(path.join(__dirname, "package.json"), "utf-8")
 );
 
-console.log("App Vertion" ,packageJson.version); 
+console.log("App Vertion", packageJson.version);
 
 app.use("/videos", express.static(VIDEOS_DIR));
 
-app.use("/",routes)
+app.use("/", routes);
 
 initializeAndSync();
 
@@ -42,7 +40,6 @@ app.listen(3001, async () => {
   // Notify the main server of the Pi server's online status
   await notifyMainServer();
 
-  
   // Schedule the auto-update check every hour (3600000 ms)
   // setInterval(autoUpdate, 3600000); // Check for updates every hour
   setInterval(autoUpdate, 60000); // Check for updates every minute

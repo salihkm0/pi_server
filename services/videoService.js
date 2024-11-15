@@ -1,8 +1,7 @@
-
 import fs from "fs";
 import path from "path";
 import axios from "axios";
-import { logSuccess, logError, logWarning } from "../utils/logger.js";
+import { logSuccess, logError, logWarning, logInfo } from "../utils/logger.js";
 import { SERVER_URL, VIDEOS_DIR } from "../server.js";
 import clc from "cli-color";
 
@@ -20,7 +19,7 @@ export const downloadVideo = async (video) => {
         const { loaded, total } = progressEvent;
         const percentComplete = Math.round((loaded * 100) / total);
         process.stdout.write(
-          clc.blue.bold(
+          logInfo(
             `Downloading ${filenameWithExt}: ${percentComplete}% complete\r`
           )
         );
@@ -33,21 +32,16 @@ export const downloadVideo = async (video) => {
     // Wait for the writing to finish
     return new Promise((resolve, reject) => {
       writer.on("finish", () => {
-        console.log(
-          clc.green.bold("\n✔ Download complete: ") + clc.green(filenameWithExt)
-        );
+        logSuccess("\n✔ Download complete: ") + clc.green(filenameWithExt);
         resolve();
       });
       writer.on("error", (error) => {
-        console.error(clc.red.bold("✖ Error writing file: "), error);
+        logError("Error writing file: "), error;
         reject(error);
       });
     });
   } catch (error) {
-    console.log(
-      clc.red.bold("✖ Failed to download ") + clc.red(filenameWithExt),
-      error
-    );
+    logError("Failed to download ") + clc.red(filenameWithExt), error;
     throw error;
   }
 };
@@ -57,14 +51,10 @@ export const downloadAllVideos = async (videos) => {
     try {
       await downloadVideo(video);
     } catch (error) {
-      console.error(
-        clc.red.bold(`Error downloading ${video.filename}: `),
-        error
-      );
+      logError(`Error downloading ${video.filename}: `), error;
     }
   }
 };
-
 
 export const fetchVideosList = async () => {
   try {
@@ -73,7 +63,7 @@ export const fetchVideosList = async () => {
     return videos;
   } catch (error) {
     logError("Error fetching videos list:");
-    console.error(error); 
+    console.error(error);
     return [];
   }
 };
