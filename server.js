@@ -65,8 +65,8 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-export const SERVER_URL = process.env.MAIN_SERVER_URL;
-export const RPI_ID = process.env.RPI_ID
+export const SERVER_URL = `https://iot-ads-display.onrender.com`;
+export const RPI_ID = process.env.RPI_ID || `piserver_0002`
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 export const VIDEOS_DIR = path.join(__dirname, "./ads-videos");
