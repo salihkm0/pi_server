@@ -6,3 +6,4 @@ export const logError = (message, error = null) => {
 };
 export const logInfo = (message) => console.log(clc.blue.bold("ℹ " + message));
 export const logWarning = (message) => console.log(clc.yellow.bold("⚠ " + message));
+

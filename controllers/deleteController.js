@@ -5,6 +5,7 @@ import path from "path";
 import clc from "cli-color";
 import axios from "axios";
 import { VIDEOS_DIR } from "../server.js";
+import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
 
 
 export const deleteVideoController =async (req,res) => {
@@ -14,10 +15,10 @@ export const deleteVideoController =async (req,res) => {
   if (fs.existsSync(filePath)) {
     fs.unlink(filePath, (err) => {
       if (err) {
-        console.error(clc.red.bold("✖ Failed to delete file:", err));
+        logError("✖ Failed to delete file:", err)
         return res.status(500).json({ message: "Failed to delete file" });
       }
-      console.log(clc.green.bold(`✔ Deleted file: ${filename}`));
+      logSuccess(`✔ Deleted file: ${filename}`)
       res.json({ message: "File deleted successfully" });
     });
   } else {

@@ -4,6 +4,7 @@ import clc from "cli-color";
 import { VIDEOS_DIR } from "../server.js";
 import { downloadVideoController } from "../controllers/downloadController.js";
 import { deleteVideoController } from "../controllers/deleteController.js";
+import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
 
 const routes = express.Router();
 
@@ -19,7 +20,7 @@ routes.get("/api/videos-list", (req, res) => {
       .filter((file) => file.endsWith(".mp4"));
     res.json({ videos });
   } catch (error) {
-    console.error(clc.red.bold("✖ Error fetching video list:"), error);
+    logError("✖ Error fetching video list:"), error;
     res.status(500).json({ message: "Failed to retrieve video list" });
   }
 });

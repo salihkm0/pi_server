@@ -4,20 +4,16 @@ import clc from "cli-color";
 import { downloadVideo, fetchVideosList } from "../services/videoService.js";
 import { isServerReachable } from "../utils/connectionUtils.js";
 import { VIDEOS_DIR } from "../server.js";
-
+import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
 // Sync function: Download new videos and delete old ones if online
 export const syncVideos = async() => {
-    console.log(clc.blue.bold("ℹ Starting sync..."));
+    logInfo("ℹ Starting sync...");
   
     const online = await isServerReachable();
-    console.log("online : " + online);
     if (!online) {
-      console.log(
-        clc.yellow.bold("⚠ Offline mode: Skipping sync and deletions.")
-      );
+      logWarning("⚠ Offline mode: Skipping sync and deletions.")
       return;
     }
-  
     const serverVideos = await fetchVideosList();
     const serverFilenames = serverVideos.map((video) =>
       video.filename.endsWith(".mp4") ? video.filename : `${video.filename}.mp4`
@@ -54,15 +50,13 @@ export const syncVideos = async() => {
       const filePath = path.join(VIDEOS_DIR, filename);
       fs.unlink(filePath, (err) => {
         if (err) {
-          console.log(
-            clc.red.bold("✖ Failed to delete ") + clc.red(filename),
+          logError("✖ Failed to delete ") + clc.red(filename),
             err
-          );
         } else {
-          console.log(clc.green.bold(`✔ Deleted extra file: ${filename}`));
+          logSuccess(`✔ Deleted extra file: ${filename}`);
         }
       });
     }
   
-    console.log(clc.green.bold("✔ Sync complete."));
+    logSuccess("✔ Sync complete.");
   }

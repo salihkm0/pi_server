@@ -3,7 +3,7 @@ import path from "path";
 import clc from "cli-color";
 import axios from "axios";
 import { VIDEOS_DIR } from "../server.js";
-
+import { logSuccess, logError} from "../utils/logger.js";
 
 export const downloadVideoController =async (req,res) => {
     const { filename, fileUrl } = req.body;
@@ -20,18 +20,16 @@ export const downloadVideoController =async (req,res) => {
       response.data.pipe(writer);
   
       writer.on("finish", () => {
-        console.log(
-          clc.green.bold(`✔ Downloaded and saved video: ${filename}.mp4`)
-        );
+        logSuccess(`Downloaded and saved video: ${filename}.mp4`);
         res.json({ message: "Video downloaded successfully" });
       });
   
       writer.on("error", (err) => {
-        console.error(clc.red.bold("✖ Error writing file:", err));
+        logError("Error writing file:", err)
         res.status(500).json({ message: "Failed to download video" });
       });
     } catch (error) {
-      console.error(clc.red.bold("✖ Error downloading video:", error));
+      logError("Error downloading video:", error)
       res.status(500).json({ message: "Failed to download video", error });
     }
 }

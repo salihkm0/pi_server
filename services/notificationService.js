@@ -1,5 +1,5 @@
 import axios from "axios";
-import { logSuccess, logError } from "../utils/logger.js";
+import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
 import { RPI_ID, SERVER_URL } from "../server.js";
 
 export const notifyMainServer = async () => {
