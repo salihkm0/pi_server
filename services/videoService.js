@@ -17,12 +17,21 @@ export const downloadVideo = async (video) => {
       responseType: "stream",
       onDownloadProgress: (progressEvent) => {
         const { loaded, total } = progressEvent;
-        const percentComplete = Math.round((loaded * 100) / total);
-        process.stdout.write(
-          logInfo(
-            `Downloading ${filenameWithExt}: ${percentComplete}% complete\r`
-          )
-        );
+
+        if (total) {
+          const percentComplete = Math.round((loaded * 100) / total);
+          process.stdout.write(
+            clc.blue.bold(
+              `Downloading ${filenameWithExt}: ${percentComplete}% complete\r`
+            )
+          );
+        } else {
+          process.stdout.write(
+            clc.blue.bold(
+              `Downloading ${filenameWithExt}: ${loaded} bytes downloaded\r`
+            )
+          );
+        }
       },
     });
 
@@ -32,16 +41,21 @@ export const downloadVideo = async (video) => {
     // Wait for the writing to finish
     return new Promise((resolve, reject) => {
       writer.on("finish", () => {
-        logSuccess("\n✔ Download complete: ") + clc.green(filenameWithExt);
+        console.log(
+          clc.green.bold("\n✔ Download complete: ") + clc.green(filenameWithExt)
+        );
         resolve();
       });
       writer.on("error", (error) => {
-        logError("Error writing file: "), error;
+        console.error(clc.red.bold("✖ Error writing file: "), error);
         reject(error);
       });
     });
   } catch (error) {
-    logError("Failed to download ") + clc.red(filenameWithExt), error;
+    console.log(
+      clc.red.bold("✖ Failed to download ") + clc.red(filenameWithExt),
+      error
+    );
     throw error;
   }
 };
