@@ -74,6 +74,7 @@ export const fetchVideosList = async () => {
   try {
     const response = await axios.get(`${SERVER_URL}/api/videos`);
     const videos = response.data;
+    
     return videos;
   } catch (error) {
     logError("Error fetching videos list:");
