@@ -35,7 +35,7 @@ app.use("/", routes);
 initializeAndSync();
 
 // Start the Pi server
-app.listen(3001, async () => {
+app.listen(3002, async () => {
   console.log(clc.yellow.bold(`✔ Server running on port 3001`));
   // Notify the main server of the Pi server's online status
   await notifyMainServer();
