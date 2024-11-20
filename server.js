@@ -9,6 +9,7 @@ import { initializeAndSync } from "./services/initializeAndSync.js";
 import { notifyMainServer } from "./services/notificationService.js";
 import routes from "./routes/index.js";
 import { autoUpdate } from "./services/updateService.js";
+import { logWarning } from "./utils/logger.js";
 
 dotenv.config();
 
@@ -36,7 +37,7 @@ initializeAndSync();
 
 // Start the Pi server
 app.listen(3000, async () => {
-  console.log(clc.yellow.bold(`✔ Server running on port 3000`));
+  logWarning(`✔ Server running on port 3000`);
   // Notify the main server of the Pi server's online status
   await notifyMainServer();
 
