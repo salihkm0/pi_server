@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import clc from "cli-color";
 import cors from "cors";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
