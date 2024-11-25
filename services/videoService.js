@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import axios from "axios";
-import { logSuccess, logError, logWarning, logInfo } from "../utils/logger.js";
+import { logError} from "../utils/logger.js";
 import { SERVER_URL, VIDEOS_DIR } from "../server.js";
 import clc from "cli-color";
 
@@ -73,7 +73,7 @@ export const downloadAllVideos = async (videos) => {
 export const fetchVideosList = async () => {
   try {
     const response = await axios.get(`${SERVER_URL}/api/videos`);
-    const videos = response.data;
+    const videos = response.data.videos;
     
     return videos;
   } catch (error) {

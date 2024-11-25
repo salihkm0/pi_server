@@ -1,4 +1,3 @@
-import clc from "cli-color";
 import { SERVER_URL } from "../server.js";
 import axios from "axios";
 import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";

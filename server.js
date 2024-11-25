@@ -17,7 +17,7 @@ app.use(express.json());
 app.use(cors());
 
 export const SERVER_URL = `https://iot-ads-display.onrender.com`;
-export const RPI_ID = process.env.RPI_ID || `piserver_0002`;
+export const RPI_ID = process.env.RPI_ID || `piserver_0001`;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 export const VIDEOS_DIR = path.join(__dirname, "./ads-videos");
@@ -35,7 +35,7 @@ app.use("/", routes);
 initializeAndSync();
 
 // Start the Pi server
-app.listen(3001, async () => {
+app.listen(3000, async () => {
   logWarning(`✔ Server running on port 3000`);
   // Notify the main server of the Pi server's online status
   await notifyMainServer();
