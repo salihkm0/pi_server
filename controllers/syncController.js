@@ -5,6 +5,7 @@ import { downloadVideo, fetchVideosList } from "../services/videoService.js";
 import { isServerReachable } from "../utils/connectionUtils.js";
 import { VIDEOS_DIR } from "../server.js";
 import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
+import { exec } from "child_process";
 
 // Sync function: Download new videos and delete old ones if online
 export const syncVideos = async () => {
