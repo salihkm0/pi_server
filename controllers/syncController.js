@@ -62,6 +62,11 @@ export const syncVideos = async () => {
     // Download the video
     await downloadVideo(video);
     logSuccess(`Downloaded: ${filenameWithExt}`);
+
+    exec(`echo "add ${localPath}" | nc localhost 4212`, (err) => {
+      if (err) logError(`Failed to add ${filenameWithExt} to VLC playlist`, err);
+      else logSuccess(`Added ${filenameWithExt} to VLC playlist.`);
+    });
   }
 
   // Delete extra local videos
@@ -72,6 +77,12 @@ export const syncVideos = async () => {
         logError(`Failed to delete ${clc.red(filename)}`, err);
       } else {
         logSuccess(`Deleted extra file: ${filename}`);
+
+        // clear VLC playlist if needed
+        exec(`echo "playlist clear" | nc localhost 4212`, (err) => {
+          if (err) logError(`Failed to clear VLC playlist after deleting ${filename}`, err);
+          else logInfo("VLC playlist cleared.");
+        });
       }
     });
   }
