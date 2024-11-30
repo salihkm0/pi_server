@@ -103,7 +103,7 @@ export const autoUpdate = async () => {
 
     // Fetch the remote package.json to check for version changes
     const response = await axios.get(REMOTE_PACKAGE_URL);
-    const remoteVersion = response.data.version;
+    const remoteVersion = response.data.app_version;
 
     logInfo(
       `Local version : ` +
