@@ -24,7 +24,7 @@ export const VIDEOS_DIR = path.join(__dirname, "./ads-videos");
 
 // Read piDetails.json file
 export const piDetails = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "piDetails.json"), "utf-8")
+  fs.readFileSync(path.join(__dirname, "./piDetails/piDetails.json"), "utf-8")
 );
 console.log("Pi Details:", piDetails);
 
