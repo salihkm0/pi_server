@@ -11,8 +11,8 @@
 # we dont need ads video folder .beacase it create automatically
 /ads-videos
 
-/.piDetails
-.piDetails
+/piDetails
+
 # testing
 /coverage
 
