@@ -82,18 +82,18 @@ import { exec } from "child_process";
 import axios from "axios";
 import dns from "dns";
 import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
-import { packageJson } from "../server.js";
 import { isInternetConnected } from "../utils/internetConnection.js";
 import { isServerReachable } from "../utils/connectionUtils.js";
 import clc from "cli-color";
+import { piDetails } from "../server.js";
 
 // Raw file URL
 const REMOTE_PACKAGE_URL =
-  "https://raw.githubusercontent.com/salihkm0/pi_server/main/package.json";
+  "https://raw.githubusercontent.com/salihkm0/pi_server/main/piDetails.json";
 
 // Function to check for version updates and apply them if needed
 export const autoUpdate = async () => {
-  const localVersion = packageJson.version;
+  const localVersion = piDetails.app_version
   try {
     const online = await isServerReachable();
     if (!online) {

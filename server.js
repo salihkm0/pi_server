@@ -18,16 +18,19 @@ app.use(express.json());
 app.use(cors());
 
 export const SERVER_URL = `https://iot-ads-display.onrender.com`;
-export const RPI_ID = process.env.RPI_ID || `piserver_0002`;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 export const VIDEOS_DIR = path.join(__dirname, "./ads-videos");
 
-export const packageJson = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "package.json"), "utf-8")
+// Read piDetails.json file
+export const piDetails = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "piDetails.json"), "utf-8")
 );
+console.log("Pi Details:", piDetails);
 
-console.log("App Vertion", packageJson.version);
+export const RPI_ID = piDetails.pi_id;
+
+console.log("App Vertion", piDetails.app_version);
 
 app.use("/videos", express.static(VIDEOS_DIR));
 
