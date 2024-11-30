@@ -9,6 +9,7 @@ import { notifyMainServer } from "./services/notificationService.js";
 import routes from "./routes/index.js";
 import { autoUpdate } from "./services/updateService.js";
 import { logWarning } from "./utils/logger.js";
+import displayRouter from "./routes/displayRoutes.js";
 
 dotenv.config();
 
@@ -17,7 +18,7 @@ app.use(express.json());
 app.use(cors());
 
 export const SERVER_URL = `https://iot-ads-display.onrender.com`;
-export const RPI_ID = process.env.RPI_ID || `piserver_0002`;
+export const RPI_ID = process.env.RPI_ID || `piserver_0001`;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 export const VIDEOS_DIR = path.join(__dirname, "./ads-videos");
@@ -31,6 +32,7 @@ console.log("App Vertion", packageJson.version);
 app.use("/videos", express.static(VIDEOS_DIR));
 
 app.use("/", routes);
+app.use("/api", displayRouter);
 
 initializeAndSync();
 
