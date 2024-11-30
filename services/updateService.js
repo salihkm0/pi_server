@@ -1,4 +1,3 @@
-
 // import { exec } from "child_process";
 // import axios from "axios";
 // import dns from "dns";
@@ -77,7 +76,6 @@
 //     });
 //   });
 
-
 import { exec } from "child_process";
 import axios from "axios";
 import dns from "dns";
@@ -93,7 +91,7 @@ const REMOTE_PACKAGE_URL =
 
 // Function to check for version updates and apply them if needed
 export const autoUpdate = async () => {
-  const localVersion = piDetails.app_version
+  const localVersion = piDetails.app_version;
   try {
     const online = await isServerReachable();
     if (!online) {
@@ -103,6 +101,7 @@ export const autoUpdate = async () => {
 
     // Fetch the remote package.json to check for version changes
     const response = await axios.get(REMOTE_PACKAGE_URL);
+    console.log(" remote package : ", response);
     const remoteVersion = response.data.app_version;
 
     logInfo(
@@ -124,7 +123,6 @@ export const autoUpdate = async () => {
 
       // Restart the application using PM2
       await runCommand("pm2 restart pi-server");
-
     } else {
       console.log(
         clc.blue("No updates available. Running the ") +
