@@ -5,7 +5,8 @@ import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
 // Utility function to check internet connection by pinging the server
 export const isServerReachable = async () => {
   try {
-    const serverRes = await axios.get(`${SERVER_URL}/api/ping`);
+    const serverRes = await axios.get(`http://localhost:5557/api/rpi/ping`);
+    // console.log("server res : ", serverRes)
     if (serverRes.status === 200 && serverRes.data.success) {
       logSuccess("Main server is reachable");
       return true;
@@ -14,9 +15,10 @@ export const isServerReachable = async () => {
       return false;
     }
   } catch (error) {
+    console.log(error)
     if (error.response) {
       // Server responded but with a status other than 200
-      logError("Main server error response:"), error.response.status;
+      logError("Main server error response:"), error;
     } else if (error.request) {
       // No response received from server
       logError("No response received from main server");

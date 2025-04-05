@@ -20,7 +20,7 @@ const initialDownloadIfEmpty = async () => {
     logWarning("No videos found locally. Downloading all videos...");
     try {
       const serverVideos = await fetchVideosList();
-      await downloadAllVideos(serverVideos); // Download all videos if directory is empty
+      await downloadAllVideos(serverVideos); 
       logSuccess("Initial download complete.");
     } catch (error) {
       logError("Error during initial download:", error);

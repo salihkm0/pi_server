@@ -17,6 +17,7 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+// export const SERVER_URL = `http://localhost:5557`;
 export const SERVER_URL = `https://iot-ads-display.onrender.com`;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,7 +31,9 @@ console.log("Pi Details:", piDetails);
 
 export const RPI_ID = piDetails.pi_id;
 
-console.log("App Vertion", piDetails.app_version);
+
+
+console.log("App Version", piDetails.app_version);
 
 app.use("/videos", express.static(VIDEOS_DIR));
 
@@ -47,5 +50,5 @@ app.listen(3000, async () => {
 
   // Schedule the auto-update check every hour (3600000 ms)
   // setInterval(autoUpdate, 3600000); // Check for updates every hour
-  setInterval(autoUpdate, 60000); // Check for updates every minute
+  // setInterval(autoUpdate, 60000); // Check for updates every minute
 });

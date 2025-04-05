@@ -72,7 +72,7 @@ export const downloadAllVideos = async (videos) => {
 
 export const fetchVideosList = async () => {
   try {
-    const response = await axios.get(`${SERVER_URL}/api/videos`);
+    const response = await axios.get(`${SERVER_URL}/api/videos/active`);
     const videos = response.data.videos;
     
     return videos;
