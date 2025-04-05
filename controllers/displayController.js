@@ -1,6 +1,4 @@
 import { exec } from "child_process"
-
-
 /**
  * Get display details using xrandr.
  * @returns {Promise<object[]>} - A promise resolving to an array of display details.
@@ -11,16 +9,13 @@ export const getDisplayDetails = () => {
         if (error) {
           return reject(`Error executing xrandr: ${stderr}`);
         }
-  
         const displays = [];
         const lines = stdout.split("\n");
-  
         lines.forEach((line) => {
           if (line.includes(" connected")) {
             const [name] = line.split(" ");
             const resolutionMatch = line.match(/(\d+x\d+)/);
             const resolution = resolutionMatch ? resolutionMatch[0] : "Unknown";
-  
             displays.push({
               name,
               status: "connected",

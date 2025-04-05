@@ -5,7 +5,7 @@ import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
 // Utility function to check internet connection by pinging the server
 export const isServerReachable = async () => {
   try {
-    const serverRes = await axios.get(`http://localhost:5557/api/rpi/ping`);
+    const serverRes = await axios.get(`https://iot-ads-display.onrender.com/api/rpi/ping`);
     // console.log("server res : ", serverRes)
     if (serverRes.status === 200 && serverRes.data.success) {
       logSuccess("Main server is reachable");
