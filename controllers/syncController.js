@@ -7,7 +7,22 @@ import { VIDEOS_DIR } from "../server.js";
 import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
 import { exec } from "child_process";
 
-// Sync function: Download new videos and delete old ones if online
+const MPV_SOCKET = "/tmp/mpv-socket";
+
+// Utility: Send JSON command to MPV via IPC
+function sendToMPV(commandObj) {
+  return new Promise((resolve, reject) => {
+    const cmd = `echo '${JSON.stringify(commandObj)}' | socat - ${MPV_SOCKET}`;
+    exec(cmd, (err, stdout, stderr) => {
+      if (err) {
+        reject(stderr || err);
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+}
+
 export const syncVideos = async () => {
   logInfo("Starting sync...");
 
@@ -23,77 +38,51 @@ export const syncVideos = async () => {
     logInfo(`Created directory: ${VIDEOS_DIR}`);
   }
 
-  // Fetch videos from the server
   const serverVideos = await fetchVideosList();
   const serverFilenames = serverVideos.map((video) =>
     video.filename.endsWith(".mp4") ? video.filename : `${video.filename}.mp4`
   );
 
-  // Read local files
   const localFilenames = fs.readdirSync(VIDEOS_DIR);
 
-  // Identify videos to download
   const videosToDownload = serverVideos.filter((video) => {
     const filenameWithExt = video.filename.endsWith(".mp4")
       ? video.filename
       : `${video.filename}.mp4`;
-    const localPath = path.join(VIDEOS_DIR, filenameWithExt);
     return !localFilenames.includes(filenameWithExt);
   });
 
-  // Identify videos to delete
   const videosToDelete = localFilenames.filter(
-    (filename) => !serverFilenames.includes(filename) // Only delete files not in the server list
+    (filename) => !serverFilenames.includes(filename)
   );
-
-  // Log if everything is up to date
   if (videosToDownload.length === 0 && videosToDelete.length === 0) {
     console.log(clc.cyan.bold("✔ All videos are up to date."));
     logSuccess("Sync complete.");
     return;
   }
-
-  // Download new videos
   for (const video of videosToDownload) {
     const filenameWithExt = video.filename.endsWith(".mp4")
       ? video.filename
       : `${video.filename}.mp4`;
     const localPath = path.join(VIDEOS_DIR, filenameWithExt);
-
-    // Download the video
     await downloadVideo(video);
     logSuccess(`Downloaded: ${filenameWithExt}`);
-
-    exec(`echo "add ${localPath}" | nc localhost 4212`, (err) => {
-      if (err) logError(`Failed to add ${filenameWithExt} to VLC playlist`, err);
-      else logSuccess(`Added ${filenameWithExt} to VLC playlist.`);
-    });
+    try {
+      await sendToMPV({ command: ["loadfile", localPath, "append-play"] });
+      logSuccess(`Added ${filenameWithExt} to MPV playlist.`);
+    } catch (err) {
+      logError(`Failed to add ${filenameWithExt} to MPV playlist`, err);
+    }
   }
-
-  // Delete extra local videos
   for (const filename of videosToDelete) {
     const filePath = path.join(VIDEOS_DIR, filename);
-    fs.unlink(filePath, (err) => {
+    fs.unlink(filePath, async (err) => {
       if (err) {
         logError(`Failed to delete ${clc.red(filename)}`, err);
       } else {
         logSuccess(`Deleted extra file: ${filename}`);
-
-        // clear VLC playlist if needed
-        exec(`echo "playlist clear" | nc localhost 4212`, (err) => {
-          if (err) logError(`Failed to clear VLC playlist after deleting ${filename}`, err);
-          else logInfo("VLC playlist cleared.");
-        });
       }
     });
   }
-
   logSuccess("Sync complete.");
 };
-
-
-
-
-
-
-
