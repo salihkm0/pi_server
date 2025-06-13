@@ -24,7 +24,7 @@ function sendToMPV(commandObj) {
 }
 
 export const syncVideos = async () => {
-  logInfo("Starting sync...");
+ logInfo("Starting sync...");
 
   const online = await isServerReachable();
   if (!online) {
@@ -67,11 +67,17 @@ export const syncVideos = async () => {
     const localPath = path.join(VIDEOS_DIR, filenameWithExt);
     await downloadVideo(video);
     logSuccess(`Downloaded: ${filenameWithExt}`);
-    try {
-      await sendToMPV({ command: ["loadfile", localPath, "append-play"] });
-      logSuccess(`Added ${filenameWithExt} to MPV playlist.`);
-    } catch (err) {
-      logError(`Failed to add ${filenameWithExt} to MPV playlist`, err);
+    
+    // Only add to playlist if MPV is running
+    if (fs.existsSync(MPV_SOCKET)) {
+      try {
+        await sendToMPV({ 
+          command: ["loadfile", localPath, "append"] 
+        });
+        logSuccess(`Added ${filenameWithExt} to MPV playlist.`);
+      } catch (err) {
+        logError(`Failed to add ${filenameWithExt} to MPV playlist`, err);
+      }
     }
   }
   for (const filename of videosToDelete) {

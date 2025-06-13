@@ -32,11 +32,11 @@ const initialDownloadIfEmpty = async () => {
 
 // Periodic syncing every 60 seconds
 const startSyncInterval = () => {
-  logInfo("Starting regular sync every 60 seconds...");
+  logInfo("Starting regular sync every 10 minutes...");
   setInterval(() => {
     logInfo(`Syncing videos at ${new Date().toLocaleTimeString()}`);
     syncVideos();
-  }, 60 * 1000);
+  }, 10 * 60 * 1000);
 };
 
 // Initialize and sync videos

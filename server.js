@@ -37,7 +37,7 @@ console.log("App Version", piDetails.app_version);
 
 app.use("/videos", express.static(VIDEOS_DIR));
 
-app.use("/", routes);
+app.use("/api", routes);
 app.use("/api", displayRouter);
 
 initializeAndSync();
