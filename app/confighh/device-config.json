@@ -1,0 +1,59 @@
+{
+  "deviceId": "pi_Salihs-MacBook-Air.local_s18qx8pe",
+  "version": "3.0.2",
+  "location": "unknown",
+  "autoUpdate": {
+    "enabled": true,
+    "checkInterval": 30,
+    "allowedTime": "02:00-06:00"
+  },
+  "video": {
+    "autoPlay": true,
+    "shuffle": true,
+    "loop": true,
+    "defaultVolume": 80
+  },
+  "sync": {
+    "enabled": true,
+    "interval": 10,
+    "onStartup": true
+  },
+  "network": {
+    "wifi": {
+      "autoConnect": true,
+      "fallbackToHotspot": true
+    }
+  },
+  "system": {
+    "mac_address": "unknown",
+    "serial_number": "",
+    "model": "",
+    "os": "unknown",
+    "architecture": "arm64",
+    "cores": 8,
+    "total_memory": "8192 MB",
+    "hostname": "Salihs-MacBook-Air.local",
+    "uptime": 863044,
+    "network_interfaces": [
+      "lo0",
+      "en0",
+      "awdl0",
+      "llw0",
+      "utun0",
+      "utun1",
+      "utun2",
+      "utun3"
+    ]
+  },
+  "created": "2025-10-30T11:21:22.095Z",
+  "updated": "2025-11-07T17:21:00.327Z",
+  "wifi": {
+    "defaultSsid": "spotus",
+    "autoConnect": true,
+    "fallbackToDefault": true,
+    "platform": "darwin",
+    "initialized": "2025-11-07T17:14:55.001Z",
+    "currentSsid": "spotus",
+    "lastConnected": "2025-11-07T17:21:00.327Z"
+  }
+}

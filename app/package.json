@@ -1,0 +1,83 @@
+{
+  "name": "raspberrypi-ads-display",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Automated ADS Display System for Raspberry Pi with Auto-Updates",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "update": "node -e \"import('./services/updateService.js').then(m => m.manualUpdate()).catch(console.error)\"",
+    "health": "node -e \"import('./services/healthMonitor.js').then(m => m.collectAndReport()).catch(console.error)\"",
+    "setup": "sudo bash scripts/setup-device.sh",
+    "deploy": "bash scripts/deploy-master.sh",
+    "status": "curl -s http://localhost:3000/health | jq .",
+    "logs": "tail -f /var/log/ads-display/app.log",
+    "test": "echo \"No tests specified\" && exit 0",
+    "postinstall": "echo 'Installation completed. Run npm run setup to configure the device.'"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "axios": "^1.6.0",
+    "cli-color": "^2.0.3",
+    "mqtt": "^4.3.7",
+    "node-cron": "^3.0.3",
+    "winston": "^3.11.0",
+    "compression": "^1.7.4",
+    "helmet": "^7.1.0",
+    "rate-limiter-flexible": "^4.0.1",
+    "node-downloader-helper": "^2.1.9",
+    "systeminformation": "^5.18.1",
+    "pm2": "^5.3.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "jshint": "^2.13.6"
+  },
+  "keywords": [
+    "raspberrypi",
+    "ads",
+    "display",
+    "digital-signage",
+    "auto-update",
+    "iot",
+    "mqtt",
+    "monitoring"
+  ],
+  "author": "Your Name <email@example.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/salihkm0/pi_server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/salihkm0/pi_server/issues"
+  },
+  "homepage": "https://github.com/salihkm0/pi_server#readme",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "arm",
+    "arm64",
+    "x64"
+  ],
+  "config": {
+    "update_check_interval": "30",
+    "health_report_interval": "5",
+    "sync_interval": "10"
+  },
+  "changelog": {
+    "1.0.0": "Initial release with hybrid auto-update system",
+    "1.0.1": "Added MQTT real-time communication",
+    "1.0.2": "Enhanced health monitoring and configuration management",
+    "1.1.0": "Multi-strategy update system with fallback mechanisms"
+  }
+}
