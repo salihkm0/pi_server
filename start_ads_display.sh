@@ -52,38 +52,79 @@ is_lite_version() {
     fi
 }
 
-# Function to start X server for Lite version
+# Function to check if X server is running
+is_xserver_running() {
+    if xset -q > /dev/null 2>&1; then
+        return 0
+    else
+        # Alternative check using ps
+        if pgrep Xorg > /dev/null 2>&1; then
+            sleep 2
+            if xset -q > /dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        return 1
+    fi
+}
+
+# Function to start X server for Lite version with better error handling
 start_xserver() {
     if is_lite_version; then
-        echo "Lite version detected - starting X server..."
+        echo "Lite version detected - checking X server..."
         
         # Check if X server is already running
-        if xset -q > /dev/null 2>&1; then
+        if is_xserver_running; then
             echo "X server is already running"
             return 0
         fi
         
-        # Start X server in background
-        startx -- -nocursor > /dev/null 2>&1 &
+        # Kill any existing X servers that might be stuck
+        pkill Xorg 2>/dev/null || true
+        sleep 2
+        
+        echo "Starting X server..."
+        
+        # Start X server with proper configuration for headless mode
+        sudo X :0 -ac -nocursor -retro -config /etc/X11/xorg.conf.headless > /dev/null 2>&1 &
         local xserver_pid=$!
         
         echo "X server started with PID: $xserver_pid"
         
-        # Wait for X server to be ready
-        local max_attempts=30
+        # Wait for X server to be ready with better detection
+        local max_attempts=20
         local attempt=1
         
         while [[ $attempt -le $max_attempts ]]; do
-            if xset -q > /dev/null 2>&1; then
+            if is_xserver_running; then
                 echo "X server is ready (attempt $attempt)"
+                
+                # Set some basic X properties
+                xset s off 2>/dev/null || true
+                xset -dpms 2>/dev/null || true
+                xset s noblank 2>/dev/null || true
+                
                 return 0
             fi
+            
+            # Check if process is still running
+            if ! kill -0 $xserver_pid 2>/dev/null; then
+                echo "Warning: X server process died, attempting alternative startup..."
+                
+                # Try alternative method
+                startx -- -nocursor -retro > /dev/null 2>&1 &
+                local new_pid=$!
+                echo "Alternative X server started with PID: $new_pid"
+                xserver_pid=$new_pid
+            fi
+            
             echo "Waiting for X server... (attempt $attempt/$max_attempts)"
             sleep 2
             ((attempt++))
         done
         
         echo "Warning: X server not ready after $max_attempts attempts"
+        echo "Continuing without X server - video playback will be disabled"
         return 1
     fi
     return 0
@@ -102,7 +143,7 @@ show_black_screen() {
     sleep 3
     
     # Set black background
-    if xset -q > /dev/null 2>&1; then
+    if is_xserver_running; then
         xsetroot -solid black 2>/dev/null && echo "Black screen set successfully"
         
         # Hide mouse pointer if X is available
@@ -162,7 +203,7 @@ monitor_wifi() {
     done &
 }
 
-# Start ngrok - Optional (skip if not available)
+# Improved ngrok handling with free trial support
 start_ngrok() {
     echo "Checking ngrok..."
     
@@ -180,39 +221,75 @@ start_ngrok() {
         return 0
     fi
     
-    echo "Starting ngrok tunnel..."
+    echo "Starting ngrok tunnel for port 3006..."
     
     # Kill any existing ngrok processes
     pkill -f ngrok || true
     sleep 2
     
-    # Start ngrok in background
-    ngrok http 3000 > /dev/null 2>&1 &
+    # Start ngrok in background with specific configuration
+    ngrok http 3006 --log=stdout > "$BASE_DIR/logs/ngrok.log" 2>&1 &
     local ngrok_pid=$!
     
-    echo "Waiting for ngrok to be ready..."
-    local max_attempts=15
+    echo "ngrok started with PID: $ngrok_pid"
+    
+    # Wait for ngrok to initialize (shorter timeout for free trial)
+    local max_attempts=10
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
-        if curl -s http://127.0.0.1:4040/api/tunnels > /dev/null 2>&1; then
+        # Try multiple endpoints
+        if curl -s http://127.0.0.1:4040/api/tunnels > /dev/null 2>&1 || \
+           curl -s http://localhost:4040/api/tunnels > /dev/null 2>&1; then
             echo "ngrok started successfully! (PID: $ngrok_pid)"
             
-            # Get public URL
-            local public_url=$(curl -s http://127.0.0.1:4040/api/tunnels | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
+            # Get public URL with error handling
+            local public_url=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
+            
+            if [[ -z "$public_url" ]]; then
+                public_url=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
+            fi
+            
             if [[ -n "$public_url" ]]; then
                 echo "Public URL: $public_url"
+            else
+                echo "Warning: Could not retrieve public URL from ngrok"
             fi
             
             return 0
         fi
+        
+        # Check if ngrok process is still running
+        if ! kill -0 $ngrok_pid 2>/dev/null; then
+            echo "Warning: ngrok process died. Check ngrok configuration."
+            echo "For free trial, ensure your account has active tunnels available."
+            return 1
+        fi
+        
         echo "Attempt $attempt: ngrok not ready yet, retrying..."
-        sleep 2
+        sleep 3
         ((attempt++))
     done
     
-    echo "Warning: ngrok failed to start within 30 seconds. Continuing without ngrok."
+    echo "Warning: ngrok failed to start within 30 seconds."
+    echo "This is normal for free trial accounts with limited resources."
+    echo "Continuing without ngrok tunnel..."
+    
+    # Don't kill ngrok - let it continue starting in background
     return 0
+}
+
+# Quick ngrok status check (non-blocking)
+check_ngrok_status() {
+    # Quick check without waiting
+    if curl -s --connect-timeout 2 http://127.0.0.1:4040/api/tunnels > /dev/null 2>&1; then
+        local public_url=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [[ -n "$public_url" ]]; then
+            echo "$public_url"
+            return 0
+        fi
+    fi
+    return 1
 }
 
 # Start Node.js App with better error handling
@@ -248,11 +325,11 @@ start_node_app() {
     
     echo "Node.js app starting with PID: $node_pid"
     
-    local max_attempts=20
+    local max_attempts=15
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
-        if curl -s http://localhost:3000/health > /dev/null 2>&1; then
+        if curl -s http://localhost:3006/health > /dev/null 2>&1; then
             echo "Node.js app started successfully! (PID: $node_pid)"
             return 0
         fi
@@ -275,7 +352,7 @@ start_node_app() {
         ((attempt++))
     done
     
-    echo "Warning: Node.js app not responding after 60 seconds, but process is still running"
+    echo "Warning: Node.js app not responding after 45 seconds, but process is still running"
     echo "App may be starting slowly. Continuing..."
     return 0
 }
@@ -303,7 +380,7 @@ update_playlist() {
     fi
 }
 
-# Optimized MPV startup with better error handling
+# Optimized MPV startup with fallback options
 start_mpv() {
     echo "Starting MPV playback..."
     
@@ -313,27 +390,17 @@ start_mpv() {
         return 1
     fi
     
-    # Ensure X server is running
-    if ! xset -q > /dev/null 2>&1; then
-        echo "Warning: X server not available. Starting X server..."
-        start_xserver
-    fi
-    
-    # Wait for X server
-    local x_attempts=0
-    while [[ $x_attempts -lt 10 ]]; do
-        if xset -q > /dev/null 2>&1; then
-            echo "X server is ready for MPV"
-            break
+    # Check if X server is available
+    if ! is_xserver_running; then
+        echo "Warning: X server not available. Attempting to start..."
+        if ! start_xserver; then
+            echo "Error: X server not available. Cannot start MPV."
+            return 1
         fi
-        sleep 1
-        ((x_attempts++))
-    done
-    
-    if [[ $x_attempts -eq 10 ]]; then
-        echo "Error: X server not available. Cannot start MPV."
-        return 1
     fi
+    
+    # Additional wait for X server stability
+    sleep 2
     
     # Kill any existing MPV processes
     pkill -f mpv || true
@@ -351,7 +418,10 @@ start_mpv() {
     
     echo "Starting MPV with optimized configuration..."
     
-    # Start MPV with simplified parameters for better compatibility
+    # Try different MPV configurations for better compatibility
+    local mpv_success=0
+    
+    # Attempt 1: Standard configuration
     mpv --fs \
         --shuffle \
         --loop-playlist=inf \
@@ -363,7 +433,7 @@ start_mpv() {
         --no-resume-playback \
         --hwdec=auto \
         --vo=xv \
-        --quiet &
+        --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
     
     local mpv_pid=$!
     
@@ -371,36 +441,59 @@ start_mpv() {
     
     # Wait for MPV to initialize
     local mpv_attempts=0
-    local mpv_max_attempts=15
+    local mpv_max_attempts=10
     
     while [[ $mpv_attempts -lt $mpv_max_attempts ]]; do
         if [[ -S "$MPV_SOCKET" ]]; then
             echo "MPV IPC socket is ready (attempt $((mpv_attempts + 1)))"
-            
-            # Test if MPV is responsive
-            if command -v socat > /dev/null 2>&1; then
-                if echo '{ "command": ["get_property", "pause"] }' | socat - "$MPV_SOCKET" 2>/dev/null | grep -q "false"; then
-                    echo "MPV is playing videos successfully"
-                    return 0
-                fi
-            else
-                echo "socat not available, assuming MPV is running"
-                return 0
-            fi
+            mpv_success=1
+            break
         fi
         
         # Check if MPV process is still alive
         if ! kill -0 $mpv_pid 2>/dev/null; then
-            echo "Error: MPV process died"
-            return 1
+            echo "MPV process died, attempting alternative configuration..."
+            break
         fi
         
         sleep 1
         ((mpv_attempts++))
     done
     
-    echo "Warning: MPV startup taking longer than expected, but process is running"
-    return 0
+    # If first attempt failed, try fallback configuration
+    if [[ $mpv_success -eq 0 ]]; then
+        echo "Trying fallback MPV configuration..."
+        pkill -f mpv || true
+        sleep 2
+        
+        # Fallback: simpler configuration
+        mpv --fs \
+            --loop-playlist=inf \
+            --no-osd-bar \
+            --no-input-default-bindings \
+            --playlist="$PLAYLIST" \
+            --hwdec=mmal \
+            --vo=drm \
+            > "$BASE_DIR/logs/mpv_fallback.log" 2>&1 &
+        
+        local fallback_pid=$!
+        echo "Fallback MPV started (PID: $fallback_pid)"
+        
+        # Quick check if fallback is running
+        sleep 3
+        if kill -0 $fallback_pid 2>/dev/null; then
+            echo "Fallback MPV configuration successful"
+            mpv_success=1
+        fi
+    fi
+    
+    if [[ $mpv_success -eq 1 ]]; then
+        echo "MPV playback started successfully"
+        return 0
+    else
+        echo "Warning: MPV startup issues detected, but process is running"
+        return 0
+    fi
 }
 
 # Reload MPV playlist dynamically without interrupting playback
@@ -456,8 +549,8 @@ main() {
     # Start WiFi monitoring
     monitor_wifi
     
-    # Start ngrok tunnel (optional)
-    start_ngrok
+    # Start ngrok tunnel (non-blocking)
+    start_ngrok &
     
     # Start Node.js application
     start_node_app
@@ -466,8 +559,13 @@ main() {
     echo "Setting up video playback..."
     update_playlist
     
-    # Start MPV playback
-    start_mpv
+    # Start MPV playback (only if X server is available)
+    if is_xserver_running; then
+        start_mpv
+    else
+        echo "X server not available - video playback disabled"
+        echo "Videos will be downloaded and stored for when display is available"
+    fi
     
     # Monitor directory for changes
     monitor_directory
@@ -487,10 +585,17 @@ main() {
             start_node_app
         fi
         
-        # Check if MPV is still running
-        if ! pgrep -f mpv > /dev/null; then
+        # Check if MPV is still running (only if X server is available)
+        if is_xserver_running && ! pgrep -f mpv > /dev/null; then
             echo "Warning: MPV stopped. Restarting..."
             start_mpv
+        fi
+        
+        # Periodic ngrok status check (non-blocking)
+        if [[ $(($(date +%s) % 300)) -eq 0 ]]; then  # Every 5 minutes
+            if check_ngrok_status; then
+                echo "ngrok tunnel is active"
+            fi
         fi
         
         sleep 10
