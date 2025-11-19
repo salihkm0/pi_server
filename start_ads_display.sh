@@ -357,11 +357,21 @@ start_node_app() {
     return 0
 }
 
-# Function to update the playlist
+# Function to update the playlist - IMPROVED with better detection
 update_playlist() {
     echo "Updating playlist..."
+    
+    # Create playlist file if it doesn't exist
+    touch "$PLAYLIST"
+    
     if [[ -d "$VIDEO_DIR" ]]; then
-        find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" \) > "$PLAYLIST"
+        # Find all video files and create playlist
+        find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" \) > "$PLAYLIST.tmp"
+        
+        # Remove empty lines and sort
+        grep -v '^$' "$PLAYLIST.tmp" | sort > "$PLAYLIST"
+        rm -f "$PLAYLIST.tmp"
+        
         local video_count=$(wc -l < "$PLAYLIST" 2>/dev/null || echo 0)
         echo "Playlist updated: $video_count videos found."
         
@@ -372,12 +382,48 @@ update_playlist() {
         else
             echo "Warning: No video files found in $VIDEO_DIR"
             echo "Supported formats: mp4, avi, mkv, mov"
+            # Create empty playlist to avoid errors
+            echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
         fi
     else
         echo "Video directory not found: $VIDEO_DIR"
         mkdir -p "$VIDEO_DIR"
         echo "Created video directory: $VIDEO_DIR"
+        # Create empty playlist
+        echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
     fi
+    
+    # Force playlist file permissions
+    chmod 644 "$PLAYLIST"
+    echo "Playlist file created/updated: $PLAYLIST"
+}
+
+# Function to force reload playlist in MPV
+force_reload_playlist() {
+    echo "Force reloading playlist in MPV..."
+    update_playlist
+    
+    if [[ -S "$MPV_SOCKET" ]] && command -v socat > /dev/null 2>&1; then
+        echo "Sending playlist reload command to MPV..."
+        echo '{ "command": ["loadlist", "'"$PLAYLIST"'", "replace"] }' | socat - "$MPV_SOCKET" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo "Playlist reload command sent successfully to MPV"
+        else
+            echo "Failed to send reload command to MPV"
+        fi
+    else
+        echo "MPV socket not available or socat not installed"
+        echo "Restarting MPV to load new playlist..."
+        start_mpv
+    fi
+}
+
+# Function to manually trigger playlist update (for external calls)
+manual_playlist_update() {
+    echo "Manual playlist update triggered..."
+    update_playlist
+    force_reload_playlist
+    echo "Manual playlist update completed"
 }
 
 # Optimized MPV startup with fallback options
@@ -406,14 +452,14 @@ start_mpv() {
     pkill -f mpv || true
     sleep 1
     
-    # Ensure playlist exists
+    # Ensure playlist exists and is updated
     update_playlist
     
     # Check if there are videos to play
-    if [[ ! -f "$PLAYLIST" ]] || [[ ! -s "$PLAYLIST" ]]; then
+    if [[ ! -f "$PLAYLIST" ]] || [[ ! -s "$PLAYLIST" ]] || [[ $(wc -l < "$PLAYLIST" 2>/dev/null) -eq 0 ]]; then
         echo "No videos found in playlist. MPV will start but play nothing."
-        # Create empty playlist file
-        touch "$PLAYLIST"
+        # Create empty playlist file with comment
+        echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
     fi
     
     echo "Starting MPV with optimized configuration..."
@@ -496,18 +542,7 @@ start_mpv() {
     fi
 }
 
-# Reload MPV playlist dynamically without interrupting playback
-reload_mpv_playlist() {
-    if [[ -S "$MPV_SOCKET" ]] && command -v socat > /dev/null 2>&1; then
-        echo "Reloading playlist in MPV..."
-        echo '{ "command": ["loadlist", "'"$PLAYLIST"'", "replace"] }' | socat - "$MPV_SOCKET"
-    else
-        echo "MPV is not running or socat not available. Restarting MPV..."
-        start_mpv
-    fi
-}
-
-# Monitor directory for changes and update the playlist dynamically
+# IMPROVED Directory monitoring with better file detection
 monitor_directory() {
     echo "Monitoring $VIDEO_DIR for changes..."
     
@@ -515,20 +550,88 @@ monitor_directory() {
     if ! command -v inotifywait &> /dev/null; then
         echo "Warning: inotifywait not available. Directory monitoring disabled."
         echo "Install inotify-tools for automatic directory monitoring."
-        return 1
+        
+        # Fallback: periodic polling
+        echo "Using periodic polling as fallback (every 30 seconds)..."
+        while true; do
+            sleep 30
+            echo "Periodic playlist check..."
+            update_playlist
+            # Only reload if MPV is running
+            if pgrep mpv > /dev/null; then
+                force_reload_playlist
+            fi
+        done &
+        return 0
     fi
     
+    # Create a more robust monitoring loop
     while true; do
-        inotifywait -e close_write -e delete -e move --format '%w%f' "$VIDEO_DIR" | while read -r file; do
-            if [[ "$file" == *.mp4 ]] || [[ "$file" == *.avi ]] || [[ "$file" == *.mkv ]] || [[ "$file" == *.mov ]]; then
-                echo "Video file change detected: $file"
-                sleep 2 # Small delay to allow for multiple changes
-                update_playlist
-                reload_mpv_playlist
+        echo "Starting directory monitor..."
+        
+        inotifywait -r -e create -e modify -e moved_to -e close_write --format '%w%f' "$VIDEO_DIR" | while read -r file; do
+            echo "File change detected: $file"
+            
+            # Check if it's a video file
+            if [[ "$file" =~ \.(mp4|avi|mkv|mov)$ ]]; then
+                echo "Video file detected: $file"
+                
+                # Wait for file to be completely written (for downloads)
+                sleep 5
+                
+                # Check if file is readable and has content
+                if [[ -f "$file" ]] && [[ -r "$file" ]] && [[ -s "$file" ]]; then
+                    echo "File is ready: $file"
+                    
+                    # Update playlist
+                    update_playlist
+                    
+                    # Reload MPV playlist
+                    force_reload_playlist
+                    
+                    echo "Playlist updated with new video: $(basename "$file")"
+                else
+                    echo "File not ready or empty: $file"
+                fi
             fi
         done
-        sleep 1
+        
+        # If inotifywait fails, wait and restart
+        echo "Directory monitor stopped, restarting in 10 seconds..."
+        sleep 10
     done &
+}
+
+# Additional function: Periodic playlist refresh (safety net)
+start_periodic_playlist_refresh() {
+    echo "Starting periodic playlist refresh (every 2 minutes)..."
+    while true; do
+        sleep 120  # 2 minutes
+        
+        # Check if videos directory exists and has files
+        if [[ -d "$VIDEO_DIR" ]]; then
+            local current_count=$(find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" \) | wc -l)
+            local playlist_count=$(wc -l < "$PLAYLIST" 2>/dev/null || echo 0)
+            
+            if [[ $current_count -ne $playlist_count ]]; then
+                echo "Playlist count mismatch (files: $current_count, playlist: $playlist_count). Updating..."
+                update_playlist
+                force_reload_playlist
+            fi
+        fi
+    done &
+}
+
+# Function to setup API endpoint for manual playlist updates
+setup_playlist_api() {
+    echo "Setting up playlist update API endpoint..."
+    
+    # Create a simple HTTP server for playlist updates if needed
+    if curl -s http://localhost:3006/api/playlist/update > /dev/null 2>&1; then
+        echo "Playlist update API is available at: http://localhost:3006/api/playlist/update"
+    else
+        echo "Note: Use manual playlist update or wait for auto-detection"
+    fi
 }
 
 # Main startup sequence
@@ -559,6 +662,9 @@ main() {
     echo "Setting up video playback..."
     update_playlist
     
+    # Setup playlist API
+    setup_playlist_api
+    
     # Start MPV playback (only if X server is available)
     if is_xserver_running; then
         start_mpv
@@ -570,11 +676,17 @@ main() {
     # Monitor directory for changes
     monitor_directory
     
+    # Start periodic playlist refresh (safety net)
+    start_periodic_playlist_refresh
+    
     echo "=========================================="
     echo "ADS Display System Started Successfully"
     echo "User: $USERNAME"
     echo "Base Directory: $BASE_DIR"
     echo "Time: $(date)"
+    echo "Playlist monitoring: ACTIVE"
+    echo "Periodic refresh: EVERY 2 MINUTES"
+    echo "Manual update: curl http://localhost:3006/api/playlist/update"
     echo "=========================================="
     
     # Keep script running and monitor processes
