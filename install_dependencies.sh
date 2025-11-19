@@ -69,7 +69,8 @@ sudo apt install -y \
     x11-utils \
     xserver-xorg \
     xinit \
-    xorg
+    xorg \
+    cron
 
 # For Lite version, install minimal X server and window manager
 if [ ! -d "/home/$USERNAME/Desktop" ]; then
@@ -237,6 +238,113 @@ if [[ -f "$BASE_DIR/start_ads_display.sh" ]]; then
     chmod +x "$BASE_DIR/start_ads_display.sh"
 fi
 
+# Setup crontab for automatic startup and monitoring
+print_status "Setting up crontab entries..."
+
+# Create a crontab setup script
+CRONTAB_SCRIPT="/tmp/setup_ads_cron.sh"
+
+cat > "$CRONTAB_SCRIPT" << EOF
+#!/bin/bash
+
+# Remove existing ADS Display entries from crontab
+crontab -l | grep -v "ads-display\|start_ads_display.sh" | crontab -
+
+# Add new crontab entries
+(
+    crontab -l 2>/dev/null | grep -v "ads-display\|start_ads_display.sh"
+    echo "@reboot sleep 30 && export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_startup.log 2>&1"
+    echo "0 3 * * * pkill -f start_ads_display.sh && sleep 10 && export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_restart.log 2>&1"
+    echo "*/5 * * * * pgrep -f start_ads_display.sh > /dev/null || (export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_recovery.log 2>&1)"
+    echo "*/10 * * * * curl -s http://localhost:3000/health > /dev/null || (pkill -f node && sleep 5 && cd $BASE_DIR && node server.js >> $BASE_DIR/logs/node_recovery.log 2>&1 &)"
+) | crontab -
+
+echo "Crontab setup completed"
+EOF
+
+chmod +x "$CRONTAB_SCRIPT"
+
+# Execute the crontab setup script
+bash "$CRONTAB_SCRIPT"
+
+# Verify crontab setup
+print_status "Verifying crontab setup..."
+crontab -l | grep -E "(ads-display|start_ads_display)"
+
+# Create a health check script for crontab
+HEALTH_SCRIPT="$BASE_DIR/health_check.sh"
+
+cat > "$HEALTH_SCRIPT" << 'EOF'
+#!/bin/bash
+
+# ADS Display Health Check Script
+# This script is called by crontab to monitor and restart services if needed
+
+BASE_DIR=''"$BASE_DIR"''
+USERNAME=''"$USERNAME"''
+LOG_FILE="$BASE_DIR/logs/health_check.log"
+
+# Ensure log directory exists
+mkdir -p "$(dirname "$LOG_FILE")"
+
+# Log function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+# Set display for GUI applications
+export DISPLAY=:0
+export XAUTHORITY=/home/$USERNAME/.Xauthority
+
+log "Starting health check..."
+
+# Check if Node.js app is running
+if ! curl -s http://localhost:3000/health > /dev/null; then
+    log "Node.js app is not responding. Restarting..."
+    pkill -f "node.*server.js" || true
+    sleep 2
+    cd "$BASE_DIR"
+    node server.js >> "$BASE_DIR/logs/node_restart.log" 2>&1 &
+    log "Node.js app restarted"
+fi
+
+# Check if MPV is running
+if ! pgrep -f mpv > /dev/null; then
+    log "MPV is not running. Restarting..."
+    pkill -f mpv || true
+    sleep 2
+    
+    # Start MPV if there are videos
+    if [ -f "$BASE_DIR/ads-videos/playlist.txt" ] && [ -s "$BASE_DIR/ads-videos/playlist.txt" ]; then
+        mpv --fs --shuffle --loop-playlist=inf --osd-level=0 --no-terminal \
+            --input-ipc-server=/tmp/mpv-socket \
+            --playlist="$BASE_DIR/ads-videos/playlist.txt" \
+            --keep-open=yes --no-resume-playback \
+            --hwdec=auto --vo=xv \
+            >> "$BASE_DIR/logs/mpv_restart.log" 2>&1 &
+        log "MPV restarted"
+    else
+        log "No videos found for MPV to play"
+    fi
+fi
+
+# Check disk space (warning if below 20%)
+DISK_USAGE=$(df / | awk 'NR==2 {print $5}' | sed 's/%//')
+if [ "$DISK_USAGE" -gt 80 ]; then
+    log "Warning: Disk usage is at ${DISK_USAGE}%"
+fi
+
+log "Health check completed"
+EOF
+
+chmod +x "$HEALTH_SCRIPT"
+
+# Add health check to crontab (every 10 minutes)
+(
+    crontab -l 2>/dev/null | grep -v "health_check.sh"
+    echo "*/10 * * * * bash $HEALTH_SCRIPT"
+) | crontab -
+
 # Make this installation script executable
 chmod +x "$0"
 
@@ -246,7 +354,18 @@ sudo systemctl daemon-reload
 # Enable the service
 sudo systemctl enable ads-display.service
 
+# Start cron service
+sudo systemctl enable cron
+sudo systemctl start cron
+
 print_status "Installation completed successfully!"
+echo ""
+print_status "Crontab entries added:"
+echo "  - @reboot: Auto-start after 30 seconds"
+echo "  - Daily 3 AM: Restart application" 
+echo "  - Every 5 minutes: Recovery if process dies"
+echo "  - Every 10 minutes: Node.js health check"
+echo "  - Every 10 minutes: Comprehensive health check"
 echo ""
 print_status "Next steps:"
 echo "1. Configure ngrok: ngrok config add-authtoken <YOUR_TOKEN>"
@@ -260,7 +379,9 @@ echo ""
 print_status "To start manually:"
 echo "  bash $BASE_DIR/start_ads_display.sh"
 echo ""
-print_status "Automatic startup is enabled via systemd service"
+print_status "View crontab: crontab -l"
+print_status "View logs: tail -f $BASE_DIR/logs/health_check.log"
+print_status "Automatic startup is enabled via systemd service AND crontab"
 
 echo "=========================================="
 echo "Installation Complete!"
