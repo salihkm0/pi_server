@@ -18,6 +18,7 @@ PLAYLIST="$VIDEO_DIR/playlist.txt"
 MPV_SOCKET="/tmp/mpv-socket"
 LOG_FILE="$BASE_DIR/logs/ads_display.log"
 CONFIG_FILE="$BASE_DIR/config/device-config.json"
+WIFI_CONFIG_FILE="$BASE_DIR/config/wifi-config.json"
 
 # Get current username
 USERNAME=$(whoami)
@@ -25,6 +26,7 @@ USERNAME=$(whoami)
 # Ensure directories exist
 mkdir -p "$(dirname "$LOG_FILE")"
 mkdir -p "$(dirname "$CONFIG_FILE")"
+mkdir -p "$(dirname "$WIFI_CONFIG_FILE")"
 mkdir -p "$VIDEO_DIR"
 
 # Redirect all output to log file
@@ -86,7 +88,7 @@ start_xserver() {
         echo "Starting X server..."
         
         # Start X server with proper configuration for headless mode
-        sudo X :0 -ac -nocursor -retro -config /etc/X11/xorg.conf.headless > /dev/null 2>&1 &
+        sudo X :0 -ac -nocursor -retro > /dev/null 2>&1 &
         local xserver_pid=$!
         
         echo "X server started with PID: $xserver_pid"
@@ -130,63 +132,197 @@ start_xserver() {
     return 0
 }
 
-# Function to display a black screen
-show_black_screen() {
-    echo "Displaying a black screen..."
+# Function to create default WiFi configuration
+create_default_wifi_config() {
+    echo "Creating default WiFi configuration..."
     
-    # Start X server first for Lite version
-    if is_lite_version; then
-        start_xserver
-    fi
+    local default_config='{
+        "ssid": "Spotus",
+        "password": "spotus123",
+        "is_default": true,
+        "created_at": "'$(date -Iseconds)'",
+        "updated_at": "'$(date -Iseconds)'"
+    }'
     
-    # Wait a bit for X server to stabilize
-    sleep 3
-    
-    # Set black background
-    if is_xserver_running; then
-        xsetroot -solid black 2>/dev/null && echo "Black screen set successfully"
-        
-        # Hide mouse pointer if X is available
-        if command -v unclutter &> /dev/null; then
-            unclutter -idle 0.1 -root &
-            echo "Mouse pointer hidden"
-        fi
-    else
-        echo "Warning: Cannot set black screen - X server not available"
-    fi
+    echo "$default_config" > "$WIFI_CONFIG_FILE"
+    chmod 600 "$WIFI_CONFIG_FILE"
+    echo "Default WiFi configuration created: SSID=Spotus"
 }
 
 # Function to read WiFi configuration from device config
 get_configured_wifi() {
-    if [[ -f "$CONFIG_FILE" ]]; then
-        local ssid=$(grep -o '"ssid": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-        if [[ -n "$ssid" ]]; then
-            echo "$ssid"
+    # First check WiFi config file
+    if [[ -f "$WIFI_CONFIG_FILE" ]]; then
+        local ssid=$(grep -o '"ssid": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
+        local password=$(grep -o '"password": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
+        if [[ -n "$ssid" && -n "$password" ]]; then
+            echo "$ssid|$password"
             return 0
         fi
     fi
+    
+    # Fallback to device config
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local ssid=$(grep -o '"ssid": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
+        local password=$(grep -o '"password": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
+        if [[ -n "$ssid" && -n "$password" ]]; then
+            echo "$ssid|$password"
+            return 0
+        fi
+    fi
+    
     return 1
 }
 
-# Function to Connect to WiFi with dynamic configuration
-connect_to_configured_wifi() {
-    local ssid=$(get_configured_wifi)
+# Function to connect to WiFi using nmcli
+connect_to_wifi() {
+    local ssid="$1"
+    local password="$2"
     
-    if [[ -n "$ssid" ]]; then
-        echo "Found configured WiFi in device config: $ssid"
-        echo "Note: WiFi password should be configured via admin dashboard"
-    else
-        echo "No WiFi configuration found in device config"
-        echo "Please configure WiFi via the admin dashboard"
+    echo "Attempting to connect to WiFi: $ssid"
+    
+    # Check if NetworkManager is available
+    if ! command -v nmcli &> /dev/null; then
+        echo "Error: NetworkManager (nmcli) not available"
+        return 1
     fi
     
+    # Check if already connected to this SSID
+    local current_ssid=$(nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2)
+    if [[ "$current_ssid" == "$ssid" ]]; then
+        echo "Already connected to $ssid"
+        return 0
+    fi
+    
+    # Try to connect
+    echo "Connecting to $ssid..."
+    nmcli device wifi connect "$ssid" password "$password" 2>&1
+    
+    if [ $? -eq 0 ]; then
+        echo "Successfully connected to $ssid"
+        
+        # Wait for connection to stabilize
+        sleep 5
+        
+        # Verify connection
+        if nmcli -t -f general.state con show "$ssid" 2>/dev/null | grep -q activated; then
+            echo "WiFi connection verified: $ssid"
+            return 0
+        else
+            echo "Warning: Connection to $ssid may not be active"
+            return 1
+        fi
+    else
+        echo "Failed to connect to $ssid"
+        return 1
+    fi
+}
+
+# Function to Connect to configured WiFi with retry logic
+connect_to_configured_wifi() {
+    echo "Setting up WiFi connection..."
+    
+    # Create default config if it doesn't exist
+    if [[ ! -f "$WIFI_CONFIG_FILE" ]]; then
+        create_default_wifi_config
+    fi
+    
+    # Get WiFi configuration
+    local wifi_config=$(get_configured_wifi)
+    if [[ -z "$wifi_config" ]]; then
+        echo "No WiFi configuration found. Using default settings."
+        create_default_wifi_config
+        wifi_config=$(get_configured_wifi)
+    fi
+    
+    local ssid=$(echo "$wifi_config" | cut -d'|' -f1)
+    local password=$(echo "$wifi_config" | cut -d'|' -f2)
+    
+    if [[ -z "$ssid" || -z "$password" ]]; then
+        echo "Error: Invalid WiFi configuration"
+        return 1
+    fi
+    
+    echo "Found WiFi configuration: SSID=$ssid"
+    
     # Check current connection
-    if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
-        local current_ssid=$(nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2)
-        echo "Currently connected to: $current_ssid"
+    local current_ssid=$(nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2)
+    if [[ "$current_ssid" == "$ssid" ]]; then
+        echo "Already connected to configured WiFi: $ssid"
+        
+        # Test internet connectivity
+        if ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
+            echo "Internet connection verified"
+            return 0
+        else
+            echo "Connected to $ssid but no internet access"
+        fi
+    fi
+    
+    # Attempt to connect with retry logic
+    local max_attempts=3
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        echo "WiFi connection attempt $attempt of $max_attempts..."
+        
+        if connect_to_wifi "$ssid" "$password"; then
+            # Test internet after connection
+            if ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
+                echo "Internet connection established via $ssid"
+                return 0
+            else
+                echo "Connected to $ssid but no internet access"
+            fi
+        fi
+        
+        ((attempt++))
+        if [[ $attempt -le $max_attempts ]]; then
+            echo "Retrying in 5 seconds..."
+            sleep 5
+        fi
+    done
+    
+    echo "Failed to connect to WiFi after $max_attempts attempts"
+    return 1
+}
+
+# Function to fetch WiFi config from central server
+fetch_wifi_config_from_server() {
+    echo "Fetching WiFi configuration from central server..."
+    
+    # Check if we have internet
+    if ! ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
+        echo "No internet connection to fetch WiFi config"
+        return 1
+    fi
+    
+    # Get device ID from config
+    local device_id=""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        device_id=$(grep -o '"deviceId": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
+    fi
+    
+    if [[ -z "$device_id" ]]; then
+        echo "No device ID found for fetching WiFi config"
+        return 1
+    fi
+    
+    # Fetch from central server
+    local response=$(curl -s -w "%{http_code}" \
+        -H "User-Agent: ADS-Display/$device_id" \
+        -H "Accept: application/json" \
+        "http://localhost:3006/api/wifi/fetch-config" \
+        2>/dev/null)
+    
+    local status_code="${response: -3}"
+    local content="${response%???}"
+    
+    if [[ $status_code -eq 200 ]]; then
+        echo "Successfully fetched WiFi config from server"
         return 0
     else
-        echo "No internet connection available"
+        echo "Failed to fetch WiFi config from server (HTTP $status_code)"
         return 1
     fi
 }
@@ -195,11 +331,20 @@ connect_to_configured_wifi() {
 monitor_wifi() {
     echo "Starting WiFi monitor..."
     while true; do
-        if ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+        # Check internet connectivity
+        if ! ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
             echo "Internet connection lost. Attempting to reconnect..."
             connect_to_configured_wifi
+            
+            # If still no internet, try fetching new config from server
+            if ! ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
+                echo "Trying to fetch updated WiFi config from server..."
+                fetch_wifi_config_from_server
+                sleep 2
+                connect_to_configured_wifi
+            fi
         fi
-        sleep 300 # Check every 5 minutes
+        sleep 60 # Check every minute
     done &
 }
 
@@ -418,14 +563,6 @@ force_reload_playlist() {
     fi
 }
 
-# Function to manually trigger playlist update (for external calls)
-manual_playlist_update() {
-    echo "Manual playlist update triggered..."
-    update_playlist
-    force_reload_playlist
-    echo "Manual playlist update completed"
-}
-
 # Optimized MPV startup with fallback options
 start_mpv() {
     echo "Starting MPV playback..."
@@ -638,15 +775,11 @@ setup_playlist_api() {
 main() {
     echo "Starting ADS Display System..."
     
-    # Show black screen immediately (this will start X server if needed)
-    show_black_screen
-    
     # Wait for network to stabilize
     echo "Waiting for network initialization..."
     sleep 5
     
     # Connect to configured WiFi
-    echo "Setting up network connection..."
     connect_to_configured_wifi
     
     # Start WiFi monitoring
@@ -684,6 +817,7 @@ main() {
     echo "User: $USERNAME"
     echo "Base Directory: $BASE_DIR"
     echo "Time: $(date)"
+    echo "Default WiFi: Spotus"
     echo "Playlist monitoring: ACTIVE"
     echo "Periodic refresh: EVERY 2 MINUTES"
     echo "Manual update: curl http://localhost:3006/api/playlist/update"

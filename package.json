@@ -1,6 +1,6 @@
 {
   "name": "raspberrypi-ads-display",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "Automated ADS Display System for Raspberry Pi with Auto-Updates",
   "main": "server.js",
