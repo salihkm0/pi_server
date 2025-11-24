@@ -132,21 +132,51 @@ start_xserver() {
     return 0
 }
 
+# Function to scan for available WiFi networks
+scan_wifi_networks() {
+    echo "Scanning for available WiFi networks..."
+    
+    if ! command -v nmcli &> /dev/null; then
+        echo "NetworkManager not available for scanning"
+        return 1
+    fi
+    
+    # Scan for networks
+    nmcli device wifi rescan 2>/dev/null
+    sleep 5
+    
+    # List available networks
+    local available_networks=$(nmcli -t -f SSID device wifi list | sort | uniq)
+    
+    if [[ -n "$available_networks" ]]; then
+        echo "Available WiFi networks:"
+        echo "$available_networks"
+        return 0
+    else
+        echo "No WiFi networks found"
+        return 1
+    fi
+}
+
 # Function to create default WiFi configuration
 create_default_wifi_config() {
     echo "Creating default WiFi configuration..."
     
+    # First, scan for available networks to suggest
+    scan_wifi_networks
+    
     local default_config='{
-        "ssid": "Spotus",
+        "ssid": "spotus",
         "password": "spotus123",
         "is_default": true,
+        "auto_connect": true,
         "created_at": "'$(date -Iseconds)'",
         "updated_at": "'$(date -Iseconds)'"
     }'
     
     echo "$default_config" > "$WIFI_CONFIG_FILE"
     chmod 600 "$WIFI_CONFIG_FILE"
-    echo "Default WiFi configuration created: SSID=Spotus"
+    echo "Empty WiFi configuration created. Configure via web interface."
 }
 
 # Function to read WiFi configuration from device config
@@ -155,17 +185,9 @@ get_configured_wifi() {
     if [[ -f "$WIFI_CONFIG_FILE" ]]; then
         local ssid=$(grep -o '"ssid": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
         local password=$(grep -o '"password": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
-        if [[ -n "$ssid" && -n "$password" ]]; then
-            echo "$ssid|$password"
-            return 0
-        fi
-    fi
-    
-    # Fallback to device config
-    if [[ -f "$CONFIG_FILE" ]]; then
-        local ssid=$(grep -o '"ssid": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-        local password=$(grep -o '"password": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-        if [[ -n "$ssid" && -n "$password" ]]; then
+        local auto_connect=$(grep -o '"auto_connect": *\(true\|false\)' "$WIFI_CONFIG_FILE" | grep -o '\(true\|false\)')
+        
+        if [[ -n "$ssid" && -n "$password" && "$auto_connect" == "true" ]]; then
             echo "$ssid|$password"
             return 0
         fi
@@ -187,6 +209,14 @@ connect_to_wifi() {
         return 1
     fi
     
+    # Check if SSID exists in available networks
+    if ! nmcli -t -f SSID device wifi list | grep -q "^$ssid$"; then
+        echo "Error: WiFi network '$ssid' not found in available networks"
+        echo "Available networks:"
+        nmcli -t -f SSID device wifi list | sort | uniq
+        return 1
+    fi
+    
     # Check if already connected to this SSID
     local current_ssid=$(nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2)
     if [[ "$current_ssid" == "$ssid" ]]; then
@@ -196,9 +226,11 @@ connect_to_wifi() {
     
     # Try to connect
     echo "Connecting to $ssid..."
-    nmcli device wifi connect "$ssid" password "$password" 2>&1
+    local connect_output
+    connect_output=$(nmcli device wifi connect "$ssid" password "$password" 2>&1)
+    local connect_result=$?
     
-    if [ $? -eq 0 ]; then
+    if [ $connect_result -eq 0 ]; then
         echo "Successfully connected to $ssid"
         
         # Wait for connection to stabilize
@@ -213,7 +245,7 @@ connect_to_wifi() {
             return 1
         fi
     else
-        echo "Failed to connect to $ssid"
+        echo "Failed to connect to $ssid: $connect_output"
         return 1
     fi
 }
@@ -225,14 +257,17 @@ connect_to_configured_wifi() {
     # Create default config if it doesn't exist
     if [[ ! -f "$WIFI_CONFIG_FILE" ]]; then
         create_default_wifi_config
+        echo "No WiFi configuration set. Please configure via web interface."
+        return 1
     fi
     
     # Get WiFi configuration
     local wifi_config=$(get_configured_wifi)
     if [[ -z "$wifi_config" ]]; then
-        echo "No WiFi configuration found. Using default settings."
-        create_default_wifi_config
-        wifi_config=$(get_configured_wifi)
+        echo "No auto-connect WiFi configuration found."
+        echo "Available networks:"
+        scan_wifi_networks
+        return 1
     fi
     
     local ssid=$(echo "$wifi_config" | cut -d'|' -f1)
@@ -243,7 +278,7 @@ connect_to_configured_wifi() {
         return 1
     fi
     
-    echo "Found WiFi configuration: SSID=$ssid"
+    echo "Found auto-connect WiFi configuration: SSID=$ssid"
     
     # Check current connection
     local current_ssid=$(nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2)
@@ -260,7 +295,7 @@ connect_to_configured_wifi() {
     fi
     
     # Attempt to connect with retry logic
-    local max_attempts=3
+    local max_attempts=2
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
@@ -287,43 +322,45 @@ connect_to_configured_wifi() {
     return 1
 }
 
-# Function to fetch WiFi config from central server
-fetch_wifi_config_from_server() {
-    echo "Fetching WiFi configuration from central server..."
-    
-    # Check if we have internet
-    if ! ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
-        echo "No internet connection to fetch WiFi config"
-        return 1
-    fi
-    
-    # Get device ID from config
-    local device_id=""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        device_id=$(grep -o '"deviceId": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
-    fi
-    
-    if [[ -z "$device_id" ]]; then
-        echo "No device ID found for fetching WiFi config"
-        return 1
-    fi
-    
-    # Fetch from central server
-    local response=$(curl -s -w "%{http_code}" \
-        -H "User-Agent: ADS-Display/$device_id" \
-        -H "Accept: application/json" \
-        "http://localhost:3006/api/wifi/fetch-config" \
-        2>/dev/null)
-    
-    local status_code="${response: -3}"
-    local content="${response%???}"
-    
-    if [[ $status_code -eq 200 ]]; then
-        echo "Successfully fetched WiFi config from server"
+# Function to check if Node.js app is already running
+is_node_app_running() {
+    if curl -s http://localhost:3006/health > /dev/null 2>&1; then
         return 0
-    else
-        echo "Failed to fetch WiFi config from server (HTTP $status_code)"
-        return 1
+    fi
+    
+    # Alternative check using process
+    if pgrep -f "node.*server.js" > /dev/null; then
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to kill existing Node.js processes on port 3006
+kill_existing_node_processes() {
+    echo "Checking for existing Node.js processes on port 3006..."
+    
+    # Find PIDs using port 3006
+    local port_pids=$(lsof -ti:3006 2>/dev/null)
+    if [[ -n "$port_pids" ]]; then
+        echo "Killing processes using port 3006: $port_pids"
+        kill -9 $port_pids 2>/dev/null || true
+        sleep 2
+    fi
+    
+    # Kill any node processes for our app
+    local node_pids=$(pgrep -f "node.*server.js" 2>/dev/null)
+    if [[ -n "$node_pids" ]]; then
+        echo "Killing existing Node.js processes: $node_pids"
+        kill -9 $node_pids 2>/dev/null || true
+        sleep 2
+    fi
+    
+    # Double check
+    if pgrep -f "node.*server.js" > /dev/null; then
+        echo "Force killing any remaining Node.js processes..."
+        pkill -9 -f "node.*server.js" 2>/dev/null || true
+        sleep 2
     fi
 }
 
@@ -335,14 +372,6 @@ monitor_wifi() {
         if ! ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
             echo "Internet connection lost. Attempting to reconnect..."
             connect_to_configured_wifi
-            
-            # If still no internet, try fetching new config from server
-            if ! ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
-                echo "Trying to fetch updated WiFi config from server..."
-                fetch_wifi_config_from_server
-                sleep 2
-                connect_to_configured_wifi
-            fi
         fi
         sleep 60 # Check every minute
     done &
@@ -377,64 +406,7 @@ start_ngrok() {
     local ngrok_pid=$!
     
     echo "ngrok started with PID: $ngrok_pid"
-    
-    # Wait for ngrok to initialize (shorter timeout for free trial)
-    local max_attempts=10
-    local attempt=1
-    
-    while [[ $attempt -le $max_attempts ]]; do
-        # Try multiple endpoints
-        if curl -s http://127.0.0.1:4040/api/tunnels > /dev/null 2>&1 || \
-           curl -s http://localhost:4040/api/tunnels > /dev/null 2>&1; then
-            echo "ngrok started successfully! (PID: $ngrok_pid)"
-            
-            # Get public URL with error handling
-            local public_url=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
-            
-            if [[ -z "$public_url" ]]; then
-                public_url=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
-            fi
-            
-            if [[ -n "$public_url" ]]; then
-                echo "Public URL: $public_url"
-            else
-                echo "Warning: Could not retrieve public URL from ngrok"
-            fi
-            
-            return 0
-        fi
-        
-        # Check if ngrok process is still running
-        if ! kill -0 $ngrok_pid 2>/dev/null; then
-            echo "Warning: ngrok process died. Check ngrok configuration."
-            echo "For free trial, ensure your account has active tunnels available."
-            return 1
-        fi
-        
-        echo "Attempt $attempt: ngrok not ready yet, retrying..."
-        sleep 3
-        ((attempt++))
-    done
-    
-    echo "Warning: ngrok failed to start within 30 seconds."
-    echo "This is normal for free trial accounts with limited resources."
-    echo "Continuing without ngrok tunnel..."
-    
-    # Don't kill ngrok - let it continue starting in background
     return 0
-}
-
-# Quick ngrok status check (non-blocking)
-check_ngrok_status() {
-    # Quick check without waiting
-    if curl -s --connect-timeout 2 http://127.0.0.1:4040/api/tunnels > /dev/null 2>&1; then
-        local public_url=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
-        if [[ -n "$public_url" ]]; then
-            echo "$public_url"
-            return 0
-        fi
-    fi
-    return 1
 }
 
 # Start Node.js App with better error handling
@@ -442,9 +414,8 @@ start_node_app() {
     echo "Starting Node.js app..."
     cd "$BASE_DIR" || { echo "Failed to navigate to Node.js app directory"; return 1; }
     
-    # Kill any existing node processes for this app
-    pkill -f "node.*server.js" || true
-    sleep 2
+    # Kill any existing node processes first
+    kill_existing_node_processes
     
     # Check if package.json exists
     if [[ ! -f "package.json" ]]; then
@@ -464,13 +435,16 @@ start_node_app() {
         npm install
     fi
     
-    # Start the node app with more verbose logging initially
-    node server.js &
+    # Wait a moment to ensure port is free
+    sleep 2
+    
+    # Start the node app
+    node server.js > "$BASE_DIR/logs/node_app.log" 2>&1 &
     local node_pid=$!
     
     echo "Node.js app starting with PID: $node_pid"
     
-    local max_attempts=15
+    local max_attempts=20
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
@@ -483,10 +457,22 @@ start_node_app() {
         if ! kill -0 $node_pid 2>/dev/null; then
             echo "Error: Node.js app process died"
             
+            # Check for port conflict
+            if lsof -ti:3006 > /dev/null 2>&1; then
+                echo "Port 3006 is still in use. Force killing..."
+                kill_existing_node_processes
+                sleep 2
+                # Retry once
+                node server.js > "$BASE_DIR/logs/node_app.log" 2>&1 &
+                node_pid=$!
+                echo "Retried Node.js app with PID: $node_pid"
+                continue
+            fi
+            
             # Try to get error output
-            if [[ -f "$LOG_FILE" ]]; then
+            if [[ -f "$BASE_DIR/logs/node_app.log" ]]; then
                 echo "Last log entries:"
-                tail -10 "$LOG_FILE"
+                tail -20 "$BASE_DIR/logs/node_app.log"
             fi
             
             return 1
@@ -497,8 +483,8 @@ start_node_app() {
         ((attempt++))
     done
     
-    echo "Warning: Node.js app not responding after 45 seconds, but process is still running"
-    echo "App may be starting slowly. Continuing..."
+    echo "Warning: Node.js app not responding after 60 seconds, but process is still running"
+    echo "Check logs at: $BASE_DIR/logs/node_app.log"
     return 0
 }
 
@@ -543,26 +529,6 @@ update_playlist() {
     echo "Playlist file created/updated: $PLAYLIST"
 }
 
-# Function to force reload playlist in MPV
-force_reload_playlist() {
-    echo "Force reloading playlist in MPV..."
-    update_playlist
-    
-    if [[ -S "$MPV_SOCKET" ]] && command -v socat > /dev/null 2>&1; then
-        echo "Sending playlist reload command to MPV..."
-        echo '{ "command": ["loadlist", "'"$PLAYLIST"'", "replace"] }' | socat - "$MPV_SOCKET" 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo "Playlist reload command sent successfully to MPV"
-        else
-            echo "Failed to send reload command to MPV"
-        fi
-    else
-        echo "MPV socket not available or socat not installed"
-        echo "Restarting MPV to load new playlist..."
-        start_mpv
-    fi
-}
-
 # Optimized MPV startup with fallback options
 start_mpv() {
     echo "Starting MPV playback..."
@@ -601,10 +567,7 @@ start_mpv() {
     
     echo "Starting MPV with optimized configuration..."
     
-    # Try different MPV configurations for better compatibility
-    local mpv_success=0
-    
-    # Attempt 1: Standard configuration
+    # Start MPV
     mpv --fs \
         --shuffle \
         --loop-playlist=inf \
@@ -621,62 +584,8 @@ start_mpv() {
     local mpv_pid=$!
     
     echo "MPV started with IPC socket: $MPV_SOCKET (PID: $mpv_pid)"
-    
-    # Wait for MPV to initialize
-    local mpv_attempts=0
-    local mpv_max_attempts=10
-    
-    while [[ $mpv_attempts -lt $mpv_max_attempts ]]; do
-        if [[ -S "$MPV_SOCKET" ]]; then
-            echo "MPV IPC socket is ready (attempt $((mpv_attempts + 1)))"
-            mpv_success=1
-            break
-        fi
-        
-        # Check if MPV process is still alive
-        if ! kill -0 $mpv_pid 2>/dev/null; then
-            echo "MPV process died, attempting alternative configuration..."
-            break
-        fi
-        
-        sleep 1
-        ((mpv_attempts++))
-    done
-    
-    # If first attempt failed, try fallback configuration
-    if [[ $mpv_success -eq 0 ]]; then
-        echo "Trying fallback MPV configuration..."
-        pkill -f mpv || true
-        sleep 2
-        
-        # Fallback: simpler configuration
-        mpv --fs \
-            --loop-playlist=inf \
-            --no-osd-bar \
-            --no-input-default-bindings \
-            --playlist="$PLAYLIST" \
-            --hwdec=mmal \
-            --vo=drm \
-            > "$BASE_DIR/logs/mpv_fallback.log" 2>&1 &
-        
-        local fallback_pid=$!
-        echo "Fallback MPV started (PID: $fallback_pid)"
-        
-        # Quick check if fallback is running
-        sleep 3
-        if kill -0 $fallback_pid 2>/dev/null; then
-            echo "Fallback MPV configuration successful"
-            mpv_success=1
-        fi
-    fi
-    
-    if [[ $mpv_success -eq 1 ]]; then
-        echo "MPV playback started successfully"
-        return 0
-    else
-        echo "Warning: MPV startup issues detected, but process is running"
-        return 0
-    fi
+    echo "MPV playback started successfully"
+    return 0
 }
 
 # IMPROVED Directory monitoring with better file detection
@@ -692,49 +601,23 @@ monitor_directory() {
         echo "Using periodic polling as fallback (every 30 seconds)..."
         while true; do
             sleep 30
-            echo "Periodic playlist check..."
             update_playlist
-            # Only reload if MPV is running
-            if pgrep mpv > /dev/null; then
-                force_reload_playlist
-            fi
         done &
         return 0
     fi
     
     # Create a more robust monitoring loop
     while true; do
-        echo "Starting directory monitor..."
-        
         inotifywait -r -e create -e modify -e moved_to -e close_write --format '%w%f' "$VIDEO_DIR" | while read -r file; do
             echo "File change detected: $file"
             
             # Check if it's a video file
             if [[ "$file" =~ \.(mp4|avi|mkv|mov)$ ]]; then
                 echo "Video file detected: $file"
-                
-                # Wait for file to be completely written (for downloads)
-                sleep 5
-                
-                # Check if file is readable and has content
-                if [[ -f "$file" ]] && [[ -r "$file" ]] && [[ -s "$file" ]]; then
-                    echo "File is ready: $file"
-                    
-                    # Update playlist
-                    update_playlist
-                    
-                    # Reload MPV playlist
-                    force_reload_playlist
-                    
-                    echo "Playlist updated with new video: $(basename "$file")"
-                else
-                    echo "File not ready or empty: $file"
-                fi
+                sleep 2
+                update_playlist
             fi
         done
-        
-        # If inotifywait fails, wait and restart
-        echo "Directory monitor stopped, restarting in 10 seconds..."
         sleep 10
     done &
 }
@@ -744,31 +627,8 @@ start_periodic_playlist_refresh() {
     echo "Starting periodic playlist refresh (every 2 minutes)..."
     while true; do
         sleep 120  # 2 minutes
-        
-        # Check if videos directory exists and has files
-        if [[ -d "$VIDEO_DIR" ]]; then
-            local current_count=$(find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" \) | wc -l)
-            local playlist_count=$(wc -l < "$PLAYLIST" 2>/dev/null || echo 0)
-            
-            if [[ $current_count -ne $playlist_count ]]; then
-                echo "Playlist count mismatch (files: $current_count, playlist: $playlist_count). Updating..."
-                update_playlist
-                force_reload_playlist
-            fi
-        fi
+        update_playlist
     done &
-}
-
-# Function to setup API endpoint for manual playlist updates
-setup_playlist_api() {
-    echo "Setting up playlist update API endpoint..."
-    
-    # Create a simple HTTP server for playlist updates if needed
-    if curl -s http://localhost:3006/api/playlist/update > /dev/null 2>&1; then
-        echo "Playlist update API is available at: http://localhost:3006/api/playlist/update"
-    else
-        echo "Note: Use manual playlist update or wait for auto-detection"
-    fi
 }
 
 # Main startup sequence
@@ -779,8 +639,8 @@ main() {
     echo "Waiting for network initialization..."
     sleep 5
     
-    # Connect to configured WiFi
-    connect_to_configured_wifi
+    # Connect to configured WiFi (non-blocking)
+    connect_to_configured_wifi &
     
     # Start WiFi monitoring
     monitor_wifi
@@ -794,9 +654,6 @@ main() {
     # Initial playlist creation
     echo "Setting up video playback..."
     update_playlist
-    
-    # Setup playlist API
-    setup_playlist_api
     
     # Start MPV playback (only if X server is available)
     if is_xserver_running; then
@@ -817,10 +674,9 @@ main() {
     echo "User: $USERNAME"
     echo "Base Directory: $BASE_DIR"
     echo "Time: $(date)"
-    echo "Default WiFi: Spotus"
+    echo "WiFi: Configure via web interface"
     echo "Playlist monitoring: ACTIVE"
-    echo "Periodic refresh: EVERY 2 MINUTES"
-    echo "Manual update: curl http://localhost:3006/api/playlist/update"
+    echo "Health check: http://localhost:3006/health"
     echo "=========================================="
     
     # Keep script running and monitor processes
@@ -835,13 +691,6 @@ main() {
         if is_xserver_running && ! pgrep -f mpv > /dev/null; then
             echo "Warning: MPV stopped. Restarting..."
             start_mpv
-        fi
-        
-        # Periodic ngrok status check (non-blocking)
-        if [[ $(($(date +%s) % 300)) -eq 0 ]]; then  # Every 5 minutes
-            if check_ngrok_status; then
-                echo "ngrok tunnel is active"
-            fi
         fi
         
         sleep 10
