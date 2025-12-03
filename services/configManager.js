@@ -3,12 +3,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { logInfo, logError, logSuccess, logWarning } from '../utils/logger.js';
 import { getDeviceId, getSystemInfo, getRaspberryPiUsername } from '../utils/systemInfo.js';
-import { wifiManager } from './wifiManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const CONFIG_PATH = path.join(__dirname, '..', 'config', 'device-config.json');
-const DEFAULT_CONFIG_PATH = path.join(__dirname, '..', 'config', 'default-config.json');
 
 class ConfigManager {
   constructor() {
@@ -39,7 +37,6 @@ class ConfigManager {
     const deviceId = await getDeviceId();
     const username = await getRaspberryPiUsername();
     const systemInfo = await getSystemInfo();
-    const defaultWifi = wifiManager.getDefaultWifi();
 
     this.config = {
       deviceId: deviceId,
@@ -64,12 +61,9 @@ class ConfigManager {
         onStartup: true
       },
       wifi: {
-        autoConnect: true,
-        fallbackToDefault: true,
+        controlledByServer: true,
         monitoringEnabled: true,
-        defaultSsid: defaultWifi.ssid,
-        defaultConfigured: true,
-        connectionTimeout: 30,
+        checkInterval: 60, // Check every minute
         maxRetries: 5,
         platform: process.platform
       },
@@ -80,10 +74,7 @@ class ConfigManager {
 
     await this.saveConfig();
     logSuccess('✅ Created default configuration');
-    logSuccess(`📡 Default WiFi configured: ${defaultWifi.ssid}`);
-
-    // Initialize default WiFi
-    await wifiManager.initializeDefaultWifi();
+    logSuccess('📡 WiFi is controlled by central server');
 
     return this.config;
   }
@@ -118,26 +109,6 @@ class ConfigManager {
     this.saveConfig();
   }
 
-  // Update WiFi configuration
-  async updateWifiConfig(ssid, options = {}) {
-    this.config.wifi = {
-      ...this.config.wifi,
-      currentSsid: ssid,
-      lastConnected: new Date().toISOString(),
-      ...options
-    };
-    await this.saveConfig();
-  }
-
-  // Update WiFi settings
-  async updateWifiSettings(settings) {
-    this.config.wifi = {
-      ...this.config.wifi,
-      ...settings
-    };
-    await this.saveConfig();
-  }
-
   // Validate configuration
   validateConfig() {
     const required = ['deviceId', 'version'];
@@ -155,22 +126,9 @@ class ConfigManager {
     return this.config.wifi || {};
   }
 
-  // Check if WiFi auto-connect is enabled
-  isWifiAutoConnectEnabled() {
-    return this.config.wifi?.autoConnect !== false;
-  }
-
-  // Check if fallback to default WiFi is enabled
-  isFallbackToDefaultEnabled() {
-    return this.config.wifi?.fallbackToDefault !== false;
-  }
-
-  // Get default WiFi info
-  getDefaultWifiInfo() {
-    return {
-      ssid: this.config.wifi?.defaultSsid || 'spotus',
-      configured: this.config.wifi?.defaultConfigured || false
-    };
+  // Check if WiFi is controlled by server
+  isWifiControlledByServer() {
+    return this.config.wifi?.controlledByServer !== false;
   }
 }
 

@@ -3,6 +3,7 @@ import path from "path";
 import cors from "cors";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
+import { execSync } from 'child_process';
 import routes from "./routes/index.js";
 import { hybridUpdateService } from "./services/updateService.js";
 import { logWarning, logInfo, logError, logSuccess } from "./utils/logger.js";
@@ -39,11 +40,13 @@ export let deviceConfig = await configManager.loadConfig();
 // Create MQTT service instance after RPI_ID is available (only if not disabled)
 export const mqttService = MQTT_BROKER !== 'disabled' ? new MQTTService(RPI_ID) : null;
 
+console.log("========================================");
 console.log("Device ID:", RPI_ID);
 console.log("Raspberry Pi Username:", RPI_USERNAME);
 console.log("MQTT Enabled:", MQTT_BROKER !== 'disabled');
 console.log("Server Port:", process.env.PORT || 3000);
 console.log("Central Server URL:", SERVER_URL);
+console.log("========================================");
 
 app.use("/videos", express.static(VIDEOS_DIR));
 app.use("/api", routes);
@@ -80,7 +83,7 @@ app.get("/health", async (req, res) => {
 // WiFi management endpoints
 app.post("/api/wifi/connect", async (req, res) => {
   try {
-    const { ssid, password, storeCredentials = true } = req.body;
+    const { ssid, password } = req.body;
     
     if (!ssid || !password) {
       return res.status(400).json({ 
@@ -89,23 +92,17 @@ app.post("/api/wifi/connect", async (req, res) => {
       });
     }
 
-    logInfo(`Attempting to connect to WiFi: ${ssid}`);
-    const result = await wifiManager.connectToWifi(ssid, password, storeCredentials);
+    logInfo(`Manual WiFi connection requested: ${ssid}`);
+    
+    // Store as temporary WiFi (for installation)
+    const result = await wifiManager.manualConnect(ssid, password);
     
     if (result.success) {
-      // Update central server with new WiFi info
-      try {
-        if (await isInternetConnected()) {
-          await updateDeviceStatus("active");
-        }
-      } catch (error) {
-        logWarning("Could not update central server with WiFi change");
-      }
-      
       res.json({ 
         success: true, 
         message: `Successfully connected to ${ssid}`,
-        ssid: ssid
+        ssid: ssid,
+        note: "This is temporary WiFi for installation only"
       });
     } else {
       res.status(400).json({ 
@@ -126,18 +123,13 @@ app.post("/api/wifi/connect", async (req, res) => {
 app.get("/api/wifi/status", async (req, res) => {
   try {
     const wifiStatus = await wifiManager.getCurrentWifi();
-    const availableNetworks = await wifiManager.scanNetworks();
     const monitoringStatus = wifiManager.getMonitoringStatus();
-    const storedNetworks = wifiManager.getAllStoredNetworks();
-    const defaultWifi = wifiManager.getDefaultWifi();
     
     res.json({
       success: true,
       current: wifiStatus,
-      available: availableNetworks,
       monitoring: monitoringStatus,
-      stored: storedNetworks,
-      default: defaultWifi
+      note: "WiFi is controlled by central server"
     });
   } catch (error) {
     logError("WiFi status error:", error);
@@ -164,42 +156,18 @@ app.post("/api/wifi/disconnect", async (req, res) => {
   }
 });
 
+// Scan networks (read-only)
 app.get("/api/wifi/networks", async (req, res) => {
   try {
-    const storedNetworks = wifiManager.getAllStoredNetworks();
-    const networksWithDetails = storedNetworks.map(ssid => {
-      const credentials = wifiManager.getStoredWifiCredentials(ssid);
-      return {
-        ssid: ssid,
-        stored: true,
-        lastUsed: credentials?.timestamp
-      };
-    });
+    const availableNetworks = await wifiManager.scanNetworks();
     
     res.json({
       success: true,
-      networks: networksWithDetails
+      networks: availableNetworks,
+      note: "Scanning only - connection controlled by server"
     });
   } catch (error) {
     logError("WiFi networks error:", error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
-
-app.delete("/api/wifi/networks/:ssid", async (req, res) => {
-  try {
-    const { ssid } = req.params;
-    await wifiManager.removeStoredCredentials(ssid);
-    
-    res.json({
-      success: true,
-      message: `Removed WiFi network: ${ssid}`
-    });
-  } catch (error) {
-    logError("WiFi network removal error:", error);
     res.status(500).json({ 
       success: false, 
       error: error.message 
@@ -212,40 +180,27 @@ app.get("/api/wifi/fetch-config", async (req, res) => {
   try {
     logInfo("Fetching WiFi configuration from central server...");
     
-    const axios = await import('axios');
-    const response = await axios.default.get(`${SERVER_URL}/api/wifi-config/${RPI_ID}`, {
-      timeout: 15000,
-      headers: {
-        'User-Agent': `ADS-Display/${RPI_ID}`,
-        'Accept': 'application/json'
-      }
-    });
-
-    if (response.data.success && response.data.has_wifi_config) {
-      const { wifi_ssid, wifi_password } = response.data;
-      
-      logInfo(`Received WiFi configuration from central server: ${wifi_ssid}`);
-      
-      // Connect using the received configuration
-      const connectResult = await wifiManager.connectToWifi(wifi_ssid, wifi_password, true);
-      
-      if (connectResult.success) {
-        res.json({
-          success: true,
-          message: `Successfully connected to configured WiFi: ${wifi_ssid}`,
-          ssid: wifi_ssid
-        });
-      } else {
-        res.status(400).json({
-          success: false,
-          message: `Failed to connect to configured WiFi: ${connectResult.error}`,
-          ssid: wifi_ssid
-        });
-      }
+    const result = await wifiManager.fetchWifiFromServer();
+    
+    if (result.success && result.hasConfig) {
+      res.json({
+        success: true,
+        message: `WiFi configuration found on server: ${result.ssid}`,
+        ssid: result.ssid,
+        hasConfig: true,
+        source: result.source
+      });
+    } else if (result.success && !result.hasConfig) {
+      res.json({
+        success: true,
+        message: "No WiFi configuration found on central server",
+        hasConfig: false
+      });
     } else {
-      res.status(404).json({
+      res.status(500).json({
         success: false,
-        message: "No WiFi configuration found on central server"
+        message: "Failed to fetch WiFi configuration",
+        error: result.error
       });
     }
   } catch (error) {
@@ -253,6 +208,32 @@ app.get("/api/wifi/fetch-config", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch WiFi configuration from central server",
+      error: error.message
+    });
+  }
+});
+
+// WiFi control endpoint (trigger manual control cycle)
+app.post("/api/wifi/control", async (req, res) => {
+  try {
+    logInfo("Manual WiFi control triggered");
+    
+    await wifiManager.controlWifi();
+    
+    const currentWifi = await wifiManager.getCurrentWifi();
+    const monitoringStatus = wifiManager.getMonitoringStatus();
+    
+    res.json({
+      success: true,
+      message: "WiFi control cycle completed",
+      currentWifi: currentWifi,
+      monitoring: monitoringStatus
+    });
+  } catch (error) {
+    logError("WiFi control error:", error);
+    res.status(500).json({
+      success: false,
+      message: "WiFi control failed",
       error: error.message
     });
   }
@@ -308,6 +289,7 @@ app.post("/api/status", async (req, res) => {
     const wifiStatus = await wifiManager.getCurrentWifi();
     const internetStatus = await isInternetConnected();
     const syncStatus = syncService.getStatus();
+    const monitoringStatus = wifiManager.getMonitoringStatus();
     
     const statusData = {
       deviceId: RPI_ID,
@@ -321,7 +303,8 @@ app.post("/api/status", async (req, res) => {
       videosCount: syncStatus.localVideos,
       wifi: wifiStatus,
       internet: internetStatus,
-      wifi_ssid: wifiStatus.connected ? wifiStatus.ssid : null
+      wifi_ssid: wifiStatus.connected ? wifiStatus.ssid : null,
+      wifi_monitoring: monitoringStatus
     };
     
     // Also update central server (if internet is available)
@@ -340,31 +323,45 @@ app.post("/api/status", async (req, res) => {
   }
 });
 
-// Initialize application with WiFi auto-connection
+// Directory verification function
+function ensureCorrectDirectory() {
+  try {
+    // Get the current working directory
+    const cwd = process.cwd();
+    console.log(`📁 Current working directory: ${cwd}`);
+    
+    // Check if this is the expected directory
+    const expectedDir = '/home/pi/ads-display';
+    
+    if (cwd !== expectedDir) {
+      console.warn(`⚠️  Warning: Not in expected directory. Expected: ${expectedDir}, Actual: ${cwd}`);
+    }
+    
+    // Check if git would work from here
+    try {
+      const gitStatus = execSync('git status', { stdio: 'pipe' }).toString();
+      console.log('✅ Git repository detected in current directory');
+    } catch {
+      console.warn('⚠️  No git repository found in current directory');
+    }
+  } catch (error) {
+    console.error('❌ Error checking directory:', error);
+  }
+}
+
+// Initialize application
 const initApp = async () => {
-  logInfo("Starting application initialization...");
+  logInfo("🚀 Starting application initialization...");
+  
+  // Check directory first
+  ensureCorrectDirectory();
 
   try {
-    // Step 1: Initialize default WiFi configuration
-    await wifiManager.initializeDefaultWifi();
-
-    // Step 2: Start WiFi auto-connection monitoring
-    if (configManager.isWifiAutoConnectEnabled()) {
-      logInfo("Starting WiFi auto-connection monitoring...");
-      wifiManager.startMonitoring();
-      
-      // Initial connection attempt
-      setTimeout(async () => {
-        logInfo("Attempting initial WiFi auto-connection...");
-        try {
-          await wifiManager.attemptAutoConnection();
-        } catch (error) {
-          logError('Initial WiFi connection attempt failed:', error);
-        }
-      }, 3000);
-    }
-
-    // Step 3: Wait for internet connection before proceeding
+    // Step 1: Start WiFi monitoring service
+    logInfo("📡 Starting WiFi monitoring service...");
+    wifiManager.startMonitoring();
+    
+    // Step 2: Wait for initial internet connection
     let internetAvailable = false;
     let attempts = 0;
     const maxAttempts = 10;
@@ -387,20 +384,20 @@ const initApp = async () => {
     }
 
     if (internetAvailable) {
-      logSuccess("Internet connection established!");
+      logSuccess("✅ Internet connection established!");
       
-      // Step 4: Test server connectivity
+      // Step 3: Test server connectivity
       await testServerConnectivity();
       
-      // Step 5: Send active status to central server
+      // Step 4: Send active status to central server
       await sendActiveStatus();
       
-      // Step 6: Initialize video sync system
+      // Step 5: Initialize video sync system
       await initializeAndSync();
       await registerDevice();
       startHealthMonitoring();
       
-      // Step 7: Start MQTT service only if enabled
+      // Step 6: Start MQTT service only if enabled
       if (mqttService) {
         try {
           await mqttService.connect();
@@ -413,12 +410,12 @@ const initApp = async () => {
         logInfo('MQTT disabled - using HTTP polling for updates');
       }
       
-      // Step 8: Start auto-update checks
+      // Step 7: Start auto-update checks
       hybridUpdateService.startPeriodicChecks();
       
-      logSuccess("All services initialized successfully");
+      logSuccess("✅ All services initialized successfully");
     } else {
-      logWarning("Starting in offline mode - some features will be limited");
+      logWarning("⚠️ Starting in offline mode - some features will be limited");
       
       // Initialize local services even without internet
       await initializeAndSync();
@@ -427,7 +424,7 @@ const initApp = async () => {
       logInfo("Offline services initialized - will retry when internet is available");
     }
   } catch (error) {
-    logError('Error during application initialization:', error);
+    logError('❌ Error during application initialization:', error);
     
     // Continue with basic services even if WiFi fails
     logInfo('Continuing with basic services despite WiFi issues...');
@@ -493,17 +490,15 @@ async function sendActiveStatus() {
   }
 }
 
-// Test server connectivity with better error handling
+// Test server connectivity
 async function testServerConnectivity() {
   try {
     const axios = await import('axios');
     logInfo(`Testing connectivity to central server: ${SERVER_URL}`);
     
-    // Test multiple endpoints since /api/health might not exist
     const endpoints = [
       `${SERVER_URL}/api/health`,
       `${SERVER_URL}/health`,
-      `${SERVER_URL}/api/videos/active`,
       `${SERVER_URL}/`
     ];
     
@@ -520,45 +515,37 @@ async function testServerConnectivity() {
         
         logSuccess(`✅ Server is accessible via ${endpoint}: ${response.status}`);
         serverAccessible = true;
-        
-        // If we found a working endpoint, test videos specifically
-        if (endpoint.includes('/videos/active')) {
-          const videos = response.data.videos || [];
-          logInfo(`✅ Video endpoint accessible. Found ${videos.length} videos on server`);
-        }
-        break; // Stop testing once we find a working endpoint
-        
+        break;
       } catch (error) {
         logInfo(`❌ Endpoint ${endpoint} not accessible: ${error.message}`);
-        continue; // Try next endpoint
+        continue;
       }
     }
     
     if (!serverAccessible) {
-      logWarning('❌ No server endpoints accessible. Video sync may fail.');
+      logWarning('❌ No server endpoints accessible.');
     }
     
   } catch (error) {
     logError(`❌ Server connectivity test failed: ${error.message}`);
-    // Don't throw error - we can continue without server connection
   }
 }
 
-// Start the server - Use the PORT from .env
+// Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  logWarning(`✔ Server running on port ${PORT}`);
-  logInfo(`✔ Device ID: ${RPI_ID}`);
-  logInfo(`✔ Raspberry Pi Username: ${RPI_USERNAME}`);
-  logInfo(`✔ Version: ${deviceConfig.version}`);
-  logInfo(`✔ MQTT: ${MQTT_BROKER !== 'disabled' ? 'Enabled' : 'Disabled'}`);
-  logInfo(`✔ Central Server: ${SERVER_URL}`);
-  logInfo(`✔ Default WiFi: ${wifiManager.getDefaultWifi().ssid}`);
+  logSuccess(`✅ Server running on port ${PORT}`);
+  logInfo(`📱 Device ID: ${RPI_ID}`);
+  logInfo(`👤 Raspberry Pi Username: ${RPI_USERNAME}`);
+  logInfo(`🔧 Version: ${deviceConfig.version}`);
+  logInfo(`📡 MQTT: ${MQTT_BROKER !== 'disabled' ? 'Enabled' : 'Disabled'}`);
+  logInfo(`🌐 Central Server: ${SERVER_URL}`);
+  logInfo(`📶 WiFi Control: Central Server Managed`);
   
   await initApp();
 });
 
-// Graceful shutdown - send offline status before exiting
+// Graceful shutdown
 process.on('SIGTERM', async () => {
   logInfo('Received SIGTERM, shutting down gracefully');
   

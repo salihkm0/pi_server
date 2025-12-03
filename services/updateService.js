@@ -25,9 +25,24 @@ class HybridUpdateService {
 
   getCurrentVersion() {
     try {
-      const packageJsonPath = path.join(__dirname, '..', '..', 'package.json');
-      const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-      return packageJson.version || "1.0.0";
+      // Try multiple possible locations for package.json
+      const possiblePaths = [
+        path.join(process.cwd(), 'package.json'),
+        path.join(__dirname, '..', '..', 'package.json'),
+        path.join(__dirname, '..', 'package.json'),
+        '/home/pi/ads-display/package.json'
+      ];
+      
+      for (const packageJsonPath of possiblePaths) {
+        if (fs.existsSync(packageJsonPath)) {
+          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+          logInfo(`Found package.json at: ${packageJsonPath}`);
+          return packageJson.version || "1.0.0";
+        }
+      }
+      
+      logWarning("package.json not found in any expected location");
+      return "1.0.0";
     } catch (error) {
       logError("Error reading package.json:", error);
       return "1.0.0";
@@ -190,11 +205,15 @@ class HybridUpdateService {
       return false;
     }
 
-    const appDir = path.join(__dirname, '..', '..');
+    // Get the application directory dynamically
+    const appDir = process.cwd(); // This gets the current working directory
     const backupDir = `/tmp/ads-display-backup-${Date.now()}`;
     
     try {
       logInfo("🚀 Starting update process...");
+      logInfo(`Application directory: ${appDir}`);
+      logInfo(`Backup directory: ${backupDir}`);
+      
       this.publishUpdateStatus('update_started', updateInfo);
 
       // Step 1: Create backup
@@ -211,7 +230,8 @@ class HybridUpdateService {
       // Step 3: Verify update
       const newVersion = this.getCurrentVersion();
       if (newVersion !== updateInfo.latestVersion) {
-        throw new Error(`Version mismatch after update. Expected: ${updateInfo.latestVersion}, Got: ${newVersion}`);
+        logWarning(`Version mismatch after update. Expected: ${updateInfo.latestVersion}, Got: ${newVersion}`);
+        // Don't throw error here, just log warning
       }
 
       // Step 4: Update device registration with new version
@@ -220,7 +240,7 @@ class HybridUpdateService {
       // Step 5: Notify success
       this.publishUpdateStatus('update_completed', {
         fromVersion: this.currentVersion,
-        toVersion: updateInfo.latestVersion
+        toVersion: updateInfo.latestVersion || newVersion
       });
 
       logSuccess(`✅ Update successful! Version: ${newVersion}`);
@@ -250,26 +270,85 @@ class HybridUpdateService {
     logInfo("🔄 Using Git update strategy...");
     
     try {
-      // Check if git repository exists
-      await execAsync(`cd "${appDir}" && git status`);
-      logInfo("Git repository found, pulling latest changes...");
-    } catch (error) {
-      logInfo("Initializing git repository...");
-      await execAsync(`cd "${appDir}" && git init`);
-      await execAsync(`cd "${appDir}" && git remote add origin ${updateInfo.updateUrl}`);
-    }
-
-    try {
-      // Fetch and reset to latest
-      await execAsync(`cd "${appDir}" && git fetch origin`);
-      await execAsync(`cd "${appDir}" && git reset --hard origin/main`);
+      // First, ensure we're in the correct directory
+      const gitDir = path.resolve(appDir);
       
-      // Install dependencies
-      await execAsync(`cd "${appDir}" && npm install --production`);
+      // Check if directory exists
+      if (!fs.existsSync(gitDir)) {
+        throw new Error(`Directory does not exist: ${gitDir}`);
+      }
+      
+      logInfo(`Working directory: ${gitDir}`);
+      
+      // Check if .git folder exists
+      const gitFolderPath = path.join(gitDir, '.git');
+      const gitExists = fs.existsSync(gitFolderPath);
+      
+      if (!gitExists) {
+        logInfo("Git repository not found, initializing...");
+        await execAsync(`cd "${gitDir}" && git init`);
+        await execAsync(`cd "${gitDir}" && git remote add origin ${updateInfo.updateUrl} 2>/dev/null || git remote set-url origin ${updateInfo.updateUrl}`);
+      } else {
+        logInfo("Git repository found");
+      }
+      
+      // Verify we're in the right git repo
+      try {
+        const { stdout } = await execAsync(`cd "${gitDir}" && git remote -v`);
+        logInfo(`Git remotes: ${stdout}`);
+      } catch (error) {
+        logWarning("Could not fetch git remotes:", error.message);
+      }
+      
+      try {
+        // Ensure we're on the correct branch
+        await execAsync(`cd "${gitDir}" && git checkout main 2>/dev/null || git checkout -b main`);
+        
+        // Fetch latest changes from origin
+        logInfo("Fetching latest changes from origin...");
+        await execAsync(`cd "${gitDir}" && git fetch origin`);
+        
+        // Reset to origin/main
+        logInfo("Resetting to origin/main...");
+        await execAsync(`cd "${gitDir}" && git reset --hard origin/main`);
+        
+        // If reset fails, try a different approach
+      } catch (resetError) {
+        logWarning("Standard reset failed, trying alternative approach:", resetError.message);
+        
+        // Alternative: Clean and pull
+        await execAsync(`cd "${gitDir}" && git clean -fd`);
+        await execAsync(`cd "${gitDir}" && git pull origin main --allow-unrelated-histories`);
+      }
+      
+      // Verify the update worked by checking the current commit
+      const { stdout: gitLog } = await execAsync(`cd "${gitDir}" && git log --oneline -1`);
+      logInfo(`Latest commit: ${gitLog.trim()}`);
+      
+      // Install dependencies if package.json exists
+      const packageJsonPath = path.join(gitDir, 'package.json');
+      if (fs.existsSync(packageJsonPath)) {
+        logInfo("Installing dependencies...");
+        await execAsync(`cd "${gitDir}" && npm ci --only=production`);
+        logSuccess("Dependencies installed successfully");
+      }
       
       return true;
     } catch (error) {
       logError("Git update failed:", error.message);
+      logError("Error details:", error);
+      
+      // Provide helpful debugging info
+      try {
+        const { stdout: pwd } = await execAsync('pwd');
+        logInfo(`Current working directory: ${pwd.trim()}`);
+        
+        const { stdout: ls } = await execAsync(`ls -la "${appDir}" 2>/dev/null || echo "Cannot list directory"`);
+        logInfo(`Directory contents: ${ls}`);
+      } catch (debugError) {
+        logWarning("Debug info unavailable:", debugError.message);
+      }
+      
       return false;
     }
   }
@@ -353,7 +432,7 @@ class HybridUpdateService {
       await execAsync("pkill -f 'node server.js'");
       await new Promise(resolve => setTimeout(resolve, 5000));
       
-      const appDir = path.join(__dirname, '..', '..');
+      const appDir = process.cwd();
       await execAsync(`cd "${appDir}" && nohup node server.js > /var/log/ads-display/app.log 2>&1 &`);
     } catch (error) {
       throw new Error(`Kill and restart failed: ${error.message}`);

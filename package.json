@@ -1,14 +1,17 @@
 {
   "name": "raspberrypi-ads-display",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "type": "module",
-  "description": "Automated ADS Display System for Raspberry Pi with Auto-Updates",
+  "description": "Automated ADS Display System for Raspberry Pi with Central Server WiFi Control",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
     "update": "node -e \"import('./services/updateService.js').then(m => m.manualUpdate()).catch(console.error)\"",
     "health": "node -e \"import('./services/healthMonitor.js').then(m => m.collectAndReport()).catch(console.error)\"",
+    "wifi-control": "node -e \"import('./services/wifiManager.js').then(m => m.wifiManager.controlWifi()).catch(console.error)\"",
+    "wifi-status": "node -e \"import('./services/wifiManager.js').then(async m => { const status = await m.wifiManager.getCurrentWifi(); const monitoring = m.wifiManager.getMonitoringStatus(); console.log('Current WiFi:', status); console.log('Monitoring:', monitoring); }).catch(console.error)\"",
+    "wifi-fetch": "node -e \"import('./services/wifiManager.js').then(m => m.wifiManager.fetchWifiFromServer()).catch(console.error)\"",
     "setup": "sudo bash scripts/setup-device.sh",
     "deploy": "bash scripts/deploy-master.sh",
     "status": "curl -s http://localhost:3000/health | jq .",
@@ -44,7 +47,8 @@
     "auto-update",
     "iot",
     "mqtt",
-    "monitoring"
+    "monitoring",
+    "wifi-control"
   ],
   "author": "Your Name <email@example.com>",
   "license": "MIT",
@@ -72,12 +76,12 @@
   "config": {
     "update_check_interval": "30",
     "health_report_interval": "5",
-    "sync_interval": "10"
+    "sync_interval": "10",
+    "wifi_check_interval": "60"
   },
   "changelog": {
-    "1.0.0": "Initial release with hybrid auto-update system",
-    "1.0.1": "Added MQTT real-time communication",
-    "1.0.2": "Enhanced health monitoring and configuration management",
-    "1.1.0": "Multi-strategy update system with fallback mechanisms"
+    "0.0.1": "Initial release with hybrid auto-update system",
+    "0.0.2": "Added MQTT real-time communication",
+    "0.0.3": "Central Server WiFi Control System - WiFi managed by central server only"
   }
 }
