@@ -351,83 +351,51 @@ class WifiManager {
     }
   }
 
-  // Fetch WiFi configuration from central server
-  async fetchWifiFromServer() {
-    try {
-      const axios = await import('axios');
-      logInfo(`📡 Fetching WiFi configuration from central server for device: ${RPI_ID}`);
-      
-      const response = await axios.default.get(`${SERVER_URL}/api/wifi-config/${RPI_ID}`, {
-        timeout: 10000,
-        headers: {
-          'User-Agent': `ADS-Display/${RPI_ID}`,
-          'Accept': 'application/json'
-        }
-      });
-
-      if (response.data.success && response.data.has_wifi_config) {
-        const { wifi_ssid, wifi_password } = response.data;
-        
-        // Store server config
-        this.lastServerConfig = {
-          ssid: wifi_ssid,
-          password: wifi_password,
-          hasConfig: true,
-          lastFetched: new Date()
-        };
-        
-        // Check if different from local config
-        const localConfig = this.localWifiConfig;
-        if (localConfig && localConfig.ssid === wifi_ssid && localConfig.password === wifi_password) {
-          logInfo(`📡 Server WiFi config matches local: ${wifi_ssid}`);
-        } else {
-          logInfo(`📡 Server WiFi config differs from local. Updating local storage...`);
-          
-          // Update local storage with server config
-          this.saveLocalWifiConfig({
-            ssid: wifi_ssid,
-            password: wifi_password,
-            source: 'server',
-            priority: 1,
-            note: 'Synced from central server'
-          });
-        }
-        
-        this.serverWifiConfigured = true;
-        this.lastServerCheck = new Date();
-        
-        return {
-          success: true,
-          ssid: wifi_ssid,
-          password: wifi_password,
-          source: 'server',
-          hasConfig: true
-        };
-      } else if (response.data.success && !response.data.has_wifi_config) {
-        logInfo('📡 No WiFi configuration found on central server');
-        
-        this.lastServerConfig = {
-          hasConfig: false,
-          lastFetched: new Date()
-        };
-        
-        this.serverWifiConfigured = false;
-        this.lastServerCheck = new Date();
-        
-        return {
-          success: true,
-          hasConfig: false,
-          source: 'server'
-        };
-      } else {
-        throw new Error(`Server returned success=false`);
+// Fetch WiFi configuration from central server - READ ONLY, DON'T SAVE LOCALLY
+async fetchWifiFromServer() {
+  try {
+    const axios = await import('axios');
+    logInfo(`📡 Fetching WiFi configuration from central server for device: ${RPI_ID}`);
+    
+    const response = await axios.default.get(`${SERVER_URL}/api/wifi-config/${RPI_ID}`, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': `ADS-Display/${RPI_ID}`,
+        'Accept': 'application/json'
       }
-    } catch (error) {
-      logError('❌ Failed to fetch WiFi configuration from server:', error.message);
+    });
+
+    if (response.data.success && response.data.has_wifi_config) {
+      const { wifi_ssid, wifi_password } = response.data;
+      
+      // Store server config for connection use ONLY
+      this.lastServerConfig = {
+        ssid: wifi_ssid,
+        password: wifi_password,
+        hasConfig: true,
+        lastFetched: new Date()
+      };
+      
+      logInfo(`📡 Server WiFi config: ${wifi_ssid} (READ ONLY - NOT saving locally)`);
+      
+      // IMPORTANT: DO NOT save server WiFi to local storage
+      // WiFi should only be configured by server admin
+      
+      this.serverWifiConfigured = true;
+      this.lastServerCheck = new Date();
+      
+      return {
+        success: true,
+        ssid: wifi_ssid,
+        password: wifi_password,
+        source: 'server',
+        hasConfig: true
+      };
+    } else if (response.data.success && !response.data.has_wifi_config) {
+      logInfo('📡 No WiFi configuration found on central server');
       
       this.lastServerConfig = {
         hasConfig: false,
-        error: error.message,
         lastFetched: new Date()
       };
       
@@ -435,12 +403,32 @@ class WifiManager {
       this.lastServerCheck = new Date();
       
       return {
-        success: false,
-        error: error.message,
+        success: true,
+        hasConfig: false,
         source: 'server'
       };
+    } else {
+      throw new Error(`Server returned success=false`);
     }
+  } catch (error) {
+    logError('❌ Failed to fetch WiFi configuration from server:', error.message);
+    
+    this.lastServerConfig = {
+      hasConfig: false,
+      error: error.message,
+      lastFetched: new Date()
+    };
+    
+    this.serverWifiConfigured = false;
+    this.lastServerCheck = new Date();
+    
+    return {
+      success: false,
+      error: error.message,
+      source: 'server'
+    };
   }
+}
 
   // Connect to WiFi
   async connectToWifi(ssid, password, source = 'unknown') {

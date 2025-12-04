@@ -1,4 +1,7 @@
 import axios from "axios";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { logSuccess, logError, logInfo, logWarning } from "../utils/logger.js";
 import { RPI_ID, RPI_USERNAME, SERVER_URL } from "../server.js";
 import { getSystemInfo, getCurrentDeviceId } from "../utils/systemInfo.js";
@@ -6,7 +9,35 @@ import { fetchPublicUrl, startNgrokTunnel } from "./tunnelService.js";
 import { wifiManager } from "./wifiManager.js";
 import { isInternetConnected } from "./videoService.js";
 
-// Enhanced device registration with internet check
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Helper function to get app version from package.json
+const getAppVersion = () => {
+  try {
+    const packageJsonPath = path.join(__dirname, '..', '..', 'package.json');
+    
+    if (fs.existsSync(packageJsonPath)) {
+      const packageData = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+      return packageData.version || "1.0.0";
+    }
+    
+    // Fallback: check in current directory
+    const localPackagePath = path.join(process.cwd(), 'package.json');
+    if (fs.existsSync(localPackagePath)) {
+      const packageData = JSON.parse(fs.readFileSync(localPackagePath, 'utf8'));
+      return packageData.version || "1.0.0";
+    }
+    
+    logWarning('⚠️ package.json not found, using default version');
+    return "1.0.0";
+  } catch (error) {
+    logError('❌ Error reading package.json:', error.message);
+    return "1.0.0";
+  }
+};
+
+// Enhanced device registration with internet check - UPDATED VERSION
 export const registerDevice = async (retries = 3) => {
   // Check internet before attempting registration
   if (!await isInternetConnected()) {
@@ -19,6 +50,10 @@ export const registerDevice = async (retries = 3) => {
   if (currentId && currentId !== RPI_ID) {
     logError(`Device ID mismatch! Current: ${currentId}, Expected: ${RPI_ID}`);
   }
+
+  // Get app version from package.json
+  const appVersion = getAppVersion();
+  logInfo(`📦 App Version from package.json: ${appVersion}`);
 
   // Try to get public URL from ngrok
   let publicUrl = await fetchPublicUrl();
@@ -39,12 +74,9 @@ export const registerDevice = async (retries = 3) => {
 
       const systemInfo = await getSystemInfo();
       const wifiStatus = await wifiManager.getCurrentWifi();
-      const defaultWifi = wifiManager.getDefaultWifi(); // This should work now
       
-      // IMPORTANT: Do NOT send WiFi password to server
-      // Only send SSID for reference, password is managed by server only
-      const wifi_ssid = wifiStatus.connected ? wifiStatus.ssid : 
-                       (defaultWifi.ssid ? defaultWifi.ssid : null);
+      // CRITICAL: DO NOT include WiFi in registration payload
+      // Devices should NEVER send WiFi credentials to server
       
       // Convert capabilities object to array of strings
       const capabilitiesArray = [
@@ -60,7 +92,7 @@ export const registerDevice = async (retries = 3) => {
         rpi_id: RPI_ID,
         rpi_name: RPI_USERNAME, // Use Raspberry Pi username
         device_info: systemInfo,
-        app_version: "1.0.0",
+        app_version: appVersion, // Use version from package.json
         location: "auto-detected",
         status: "active",
         first_seen: new Date().toISOString(),
@@ -68,19 +100,21 @@ export const registerDevice = async (retries = 3) => {
         mac_address: systemInfo.mac_address,
         serial_number: systemInfo.serial_number,
         capabilities: capabilitiesArray,
-        // Only send SSID, NOT password
-        wifi_ssid: wifi_ssid,
-        // DO NOT send wifi_password - server manages passwords
+        // DO NOT send any WiFi information
+        // REMOVED: wifi_ssid, wifi_password
         ...(publicUrl && { rpi_serverUrl: publicUrl }) // Include public URL if available
       };
 
-      logInfo(`📝 Attempting device registration with ID: ${RPI_ID}, Username: ${RPI_USERNAME}`);
+      logInfo(`📝 Attempting device registration with ID: ${RPI_ID}, Username: ${RPI_USERNAME}, Version: ${appVersion}`);
       
-      if (wifi_ssid) {
-        logInfo(`📡 Current WiFi: ${wifi_ssid}`);
+      if (wifiStatus.connected) {
+        logInfo(`📡 Current WiFi: ${wifiStatus.ssid}`);
       } else {
         logWarning(`⚠️ No WiFi connection available`);
       }
+      
+      // DEBUG: Log what we're sending
+      logInfo(`📤 Registration payload (NO WiFi included): ${JSON.stringify(payload)}`);
       
       if (publicUrl) {
         logInfo(`🌐 Using public URL: ${publicUrl}`);
@@ -100,17 +134,16 @@ export const registerDevice = async (retries = 3) => {
       if (response.status === 200 || response.status === 201) {
         logSuccess(`✅ Device registered successfully with central server (ID: ${RPI_ID}, Username: ${RPI_USERNAME})`);
         
-        if (wifi_ssid) {
-          logInfo(`📡 WiFi SSID sent to server (for reference only): ${wifi_ssid}`);
-        }
-        
-        if (publicUrl) {
-          logSuccess(`🌐 Public URL saved to device: ${publicUrl}`);
-        }
-        
         // Log the response for debugging
         if (response.data) {
           logInfo(`📋 Registration response: ${JSON.stringify(response.data)}`);
+          
+          // Check if server says WiFi is configured
+          if (response.data.device && response.data.device.wifi_configured) {
+            logInfo(`📡 Server WiFi Status: Configured - ${response.data.device.wifi_ssid || 'SSID not shown'}`);
+          } else {
+            logInfo(`📡 Server WiFi Status: Not configured`);
+          }
         }
         
         return true;
@@ -123,10 +156,18 @@ export const registerDevice = async (retries = 3) => {
       if (error.response) {
         logError(`❌ Server response: ${error.response.status} - ${JSON.stringify(error.response.data)}`);
         
+        // If it's rate limiting (429), wait longer
+        if (error.response.status === 429) {
+          const delay = attempt * 30000; // 30, 60, 90 seconds for rate limiting
+          logInfo(`🔄 Rate limited. Waiting ${delay/1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
         // If it's a schema validation error, we can try a simpler payload
         if (error.response.status === 500 && error.response.data?.error?.includes('CastError')) {
           logInfo('🔄 Trying simplified registration payload...');
-          await trySimplifiedRegistration(attempt, publicUrl);
+          await trySimplifiedRegistration(attempt, publicUrl, appVersion);
           continue;
         }
       }
@@ -143,16 +184,12 @@ export const registerDevice = async (retries = 3) => {
   return false;
 };
 
-// Simplified registration for schema issues
-async function trySimplifiedRegistration(attempt, publicUrl) {
+// Simplified registration for schema issues - ALSO NO WIFI
+async function trySimplifiedRegistration(attempt, publicUrl, appVersion) {
   try {
     const systemInfo = await getSystemInfo();
-    const wifiStatus = await wifiManager.getCurrentWifi();
-    const defaultWifi = wifiManager.getDefaultWifi();
     
-    const wifi_ssid = wifiStatus.connected ? wifiStatus.ssid : 
-                     (defaultWifi.ssid ? defaultWifi.ssid : null);
-    
+    // DO NOT get WiFi status for registration
     const simplifiedPayload = {
       rpi_id: RPI_ID,
       rpi_name: RPI_USERNAME,
@@ -164,14 +201,16 @@ async function trySimplifiedRegistration(attempt, publicUrl) {
         hostname: systemInfo.hostname,
         username: systemInfo.username
       },
-      app_version: "1.0.0",
+      app_version: appVersion, // Use version from package.json
       location: "auto-detected",
       rpi_status: "active",
       last_seen: new Date().toISOString(),
-      wifi_ssid: wifi_ssid, // Only SSID, no password
+      // NO WiFi here either
       ...(publicUrl && { rpi_serverUrl: publicUrl })
     };
 
+    logInfo(`🔄 Trying simplified registration (NO WiFi)...`);
+    
     const response = await axios.post(`${SERVER_URL}/api/rpi/update`, simplifiedPayload, {
       timeout: 15000,
       headers: {
@@ -182,10 +221,6 @@ async function trySimplifiedRegistration(attempt, publicUrl) {
 
     if (response.status === 200) {
       logSuccess(`✅ Device registered via simplified payload (attempt ${attempt})`);
-      
-      if (wifi_ssid) {
-        logInfo(`📡 WiFi SSID sent: ${wifi_ssid}`);
-      }
       
       if (publicUrl) {
         logSuccess(`🌐 Public URL saved: ${publicUrl}`);
@@ -211,12 +246,13 @@ export const updateDeviceStatus = async (status = "active", systemInfo = null) =
       systemInfo = await getSystemInfo();
     }
 
-    const wifiStatus = await wifiManager.getCurrentWifi();
-    
+    // Get app version from package.json
+    const appVersion = getAppVersion();
+
     // Try to get current public URL
     const publicUrl = await fetchPublicUrl(2, 3000);
 
-    // Use the simplified payload for status updates to avoid schema issues
+    // Use the simplified payload for status updates - NO WIFI
     const payload = {
       rpi_id: RPI_ID,
       rpi_name: RPI_USERNAME,
@@ -229,13 +265,13 @@ export const updateDeviceStatus = async (status = "active", systemInfo = null) =
         hostname: systemInfo.hostname,
         username: systemInfo.username
       },
+      app_version: appVersion, // Include version in status updates too
       last_seen: new Date().toISOString(),
-      wifi_ssid: wifiStatus.connected ? wifiStatus.ssid : null,
+      // DO NOT send WiFi SSID
       ...(publicUrl && { rpi_serverUrl: publicUrl })
     };
 
-    logInfo(`🔄 Updating device status to: ${status}`);
-    logInfo(`📡 Current WiFi: ${wifiStatus.connected ? wifiStatus.ssid : 'Disconnected'}`);
+    logInfo(`🔄 Updating device status to: ${status} (Version: ${appVersion})`);
     
     if (publicUrl) {
       logInfo(`🌐 Using public URL: ${publicUrl}`);
