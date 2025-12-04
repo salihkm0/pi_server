@@ -83,7 +83,7 @@ app.get("/health", async (req, res) => {
 // WiFi management endpoints
 app.post("/api/wifi/connect", async (req, res) => {
   try {
-    const { ssid, password } = req.body;
+    const { ssid, password, save = true } = req.body;
     
     if (!ssid || !password) {
       return res.status(400).json({ 
@@ -92,17 +92,22 @@ app.post("/api/wifi/connect", async (req, res) => {
       });
     }
 
-    logInfo(`Manual WiFi connection requested: ${ssid}`);
+    logInfo(`🔧 Manual WiFi connection: ${ssid}, Save: ${save}`);
     
-    // Store as temporary WiFi (for installation)
-    const result = await wifiManager.manualConnect(ssid, password);
+    let result;
+    if (save) {
+      result = await wifiManager.manualConnectAndSave(ssid, password, 'manual');
+    } else {
+      result = await wifiManager.connectToWifi(ssid, password, 'temporary');
+    }
     
     if (result.success) {
       res.json({ 
         success: true, 
         message: `Successfully connected to ${ssid}`,
         ssid: ssid,
-        note: "This is temporary WiFi for installation only"
+        saved_locally: save,
+        note: save ? "Saved to local storage" : "Temporary connection only"
       });
     } else {
       res.status(400).json({ 
@@ -122,20 +127,138 @@ app.post("/api/wifi/connect", async (req, res) => {
 
 app.get("/api/wifi/status", async (req, res) => {
   try {
-    const wifiStatus = await wifiManager.getCurrentWifi();
-    const monitoringStatus = wifiManager.getMonitoringStatus();
+    const status = await wifiManager.getWifiStatus();
     
     res.json({
       success: true,
-      current: wifiStatus,
-      monitoring: monitoringStatus,
-      note: "WiFi is controlled by central server"
+      ...status,
+      note: "WiFi is controlled by central server with local fallback"
     });
   } catch (error) {
     logError("WiFi status error:", error);
     res.status(500).json({ 
       success: false, 
       error: error.message 
+    });
+  }
+});
+
+app.get("/api/wifi/config", (req, res) => {
+  try {
+    const config = wifiManager.getWifiInfo();
+    
+    res.json({
+      success: true,
+      ...config,
+      default_wifi: {
+        ssid: "spotus",
+        password: "********",
+        note: "Default fallback WiFi"
+      }
+    });
+  } catch (error) {
+    logError("WiFi config error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+app.post("/api/wifi/update-local", async (req, res) => {
+  try {
+    const { ssid, password } = req.body;
+    
+    if (!ssid || !password) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "SSID and password are required" 
+      });
+    }
+    
+    const saved = wifiManager.saveLocalWifiConfig({
+      ssid: ssid,
+      password: password,
+      source: 'api',
+      priority: 1,
+      note: 'Updated via API'
+    });
+    
+    if (saved) {
+      res.json({
+        success: true,
+        message: `Local WiFi config updated: ${ssid}`,
+        ssid: ssid
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: "Failed to save local WiFi config"
+      });
+    }
+  } catch (error) {
+    logError("Update local WiFi error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+app.post("/api/wifi/reset-default", async (req, res) => {
+  try {
+    // Reset to default WiFi
+    wifiManager.createDefaultLocalWifi();
+    
+    // Try to connect to default WiFi
+    const result = await wifiManager.connectToWifi(
+      DEFAULT_WIFI_SSID, 
+      DEFAULT_WIFI_PASSWORD, 
+      'default-reset'
+    );
+    
+    res.json({
+      success: result.success,
+      message: result.success ? 
+        "Reset to default WiFi" : 
+        "Reset config but connection failed",
+      ssid: DEFAULT_WIFI_SSID,
+      connected: result.success,
+      error: result.error
+    });
+  } catch (error) {
+    logError("Reset WiFi error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+app.post("/api/wifi/sync", async (req, res) => {
+  try {
+    logInfo("🔄 Manual WiFi sync triggered");
+    
+    // Force fetch from server
+    const serverConfig = await wifiManager.fetchWifiFromServer();
+    const currentConfig = wifiManager.getCurrentWifiConfig();
+    
+    res.json({
+      success: true,
+      message: "WiFi sync completed",
+      server_config: serverConfig,
+      current_config: currentConfig,
+      local_config: wifiManager.localWifiConfig,
+      note: serverConfig.hasConfig ? 
+        "Server config fetched and saved locally" : 
+        "No server config available"
+    });
+  } catch (error) {
+    logError("WiFi sync error:", error);
+    res.status(500).json({
+      success: false,
+      message: "WiFi sync failed",
+      error: error.message
     });
   }
 });
@@ -357,27 +480,28 @@ const initApp = async () => {
   ensureCorrectDirectory();
 
   try {
-    // Step 1: Start WiFi monitoring service
-    logInfo("📡 Starting WiFi monitoring service...");
+    // Step 1: Start WiFi monitoring service with local fallback
+    logInfo("📡 Starting WiFi monitoring service with local fallback...");
     wifiManager.startMonitoring();
     
-    // Step 2: Wait for initial internet connection
+    // Step 2: Try to get internet using WiFi manager (which uses local fallback)
     let internetAvailable = false;
     let attempts = 0;
-    const maxAttempts = 10;
+    const maxAttempts = 5; // Reduced attempts since WiFi manager handles retries
 
     while (!internetAvailable && attempts < maxAttempts) {
       attempts++;
-      logInfo(`Checking internet connectivity (attempt ${attempts}/${maxAttempts})...`);
+      logInfo(`🌐 Checking internet connectivity (attempt ${attempts}/${maxAttempts})...`);
       
-      internetAvailable = await isInternetConnected();
+      // Use WiFi manager's testInternet which will try to connect using available configs
+      internetAvailable = await wifiManager.testInternet();
       
       if (!internetAvailable) {
         if (attempts < maxAttempts) {
-          logWarning(`No internet connection. Retrying in 30 seconds...`);
-          await new Promise(resolve => setTimeout(resolve, 30000));
+          logWarning(`🌐 No internet. WiFi manager will retry automatically in 30 seconds...`);
+          await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10 seconds
         } else {
-          logError("Could not establish internet connection after maximum attempts");
+          logWarning("⚠️ Could not establish internet connection - using offline mode");
           break;
         }
       }
@@ -394,42 +518,92 @@ const initApp = async () => {
       
       // Step 5: Initialize video sync system
       await initializeAndSync();
-      await registerDevice();
+      
+      // Step 6: Register device with server
+      try {
+        await registerDevice();
+      } catch (error) {
+        logError(`❌ Device registration failed: ${error.message}`);
+        logInfo("🔄 Will retry registration in next health check");
+      }
+      
+      // Step 7: Start health monitoring
       startHealthMonitoring();
       
-      // Step 6: Start MQTT service only if enabled
+      // Step 8: Start MQTT service only if enabled
       if (mqttService) {
         try {
           await mqttService.connect();
-          logSuccess('MQTT service connected successfully');
+          logSuccess('✅ MQTT service connected successfully');
         } catch (error) {
-          logWarning(`MQTT connection failed: ${error.message}`);
-          logInfo('Continuing without MQTT - device will use HTTP polling');
+          logWarning(`⚠️ MQTT connection failed: ${error.message}`);
+          logInfo('📡 Continuing without MQTT - device will use HTTP polling');
         }
       } else {
-        logInfo('MQTT disabled - using HTTP polling for updates');
+        logInfo('📡 MQTT disabled - using HTTP polling for updates');
       }
       
-      // Step 7: Start auto-update checks
+      // Step 9: Start auto-update checks
       hybridUpdateService.startPeriodicChecks();
+      
+      // Step 10: Log WiFi status
+      const wifiStatus = await wifiManager.getWifiStatus();
+      logInfo(`📶 WiFi Status: ${wifiStatus.current_wifi.ssid || 'Disconnected'}`);
+      logInfo(`🌐 Internet: ${wifiStatus.internet ? 'Available' : 'Unavailable'}`);
       
       logSuccess("✅ All services initialized successfully");
     } else {
-      logWarning("⚠️ Starting in offline mode - some features will be limited");
+      logWarning("⚠️ Starting in offline mode - using local WiFi configuration");
+      
+      // Log current WiFi configuration
+      const wifiConfig = wifiManager.getCurrentWifiConfig();
+      logInfo(`📡 Using local WiFi config: ${wifiConfig.ssid} (${wifiConfig.source})`);
       
       // Initialize local services even without internet
       await initializeAndSync();
       startHealthMonitoring();
       
-      logInfo("Offline services initialized - will retry when internet is available");
+      logInfo("🔄 Offline services initialized - will retry server sync when internet is available");
     }
+    
+    // Step 11: Schedule periodic WiFi status checks
+    setInterval(async () => {
+      try {
+        const wifiStatus = await wifiManager.getWifiStatus();
+        const hasInternet = wifiStatus.internet;
+        
+        if (hasInternet) {
+          // Update device status periodically when online
+          await updateDeviceStatus("active");
+        }
+        
+        // Log WiFi status periodically
+        logInfo(`📊 Periodic WiFi Check: Connected=${wifiStatus.current_wifi.connected ? wifiStatus.current_wifi.ssid : 'No'}, Internet=${hasInternet}`);
+      } catch (error) {
+        logError('Periodic WiFi check error:', error);
+      }
+    }, 300000); // Every 5 minutes
+    
   } catch (error) {
     logError('❌ Error during application initialization:', error);
     
-    // Continue with basic services even if WiFi fails
-    logInfo('Continuing with basic services despite WiFi issues...');
-    await initializeAndSync();
-    startHealthMonitoring();
+    // Continue with basic services even if initialization fails
+    logInfo('🔄 Continuing with basic services despite initialization errors...');
+    
+    try {
+      // Always start WiFi monitoring
+      if (!wifiManager.isMonitoring) {
+        wifiManager.startMonitoring();
+      }
+      
+      // Initialize local services
+      await initializeAndSync();
+      startHealthMonitoring();
+      
+      logInfo('✅ Basic services started');
+    } catch (fallbackError) {
+      logError('❌ Even basic services failed:', fallbackError);
+    }
   }
 };
 

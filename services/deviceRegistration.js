@@ -39,7 +39,12 @@ export const registerDevice = async (retries = 3) => {
 
       const systemInfo = await getSystemInfo();
       const wifiStatus = await wifiManager.getCurrentWifi();
-      const defaultWifi = wifiManager.getDefaultWifi();
+      const defaultWifi = wifiManager.getDefaultWifi(); // This should work now
+      
+      // IMPORTANT: Do NOT send WiFi password to server
+      // Only send SSID for reference, password is managed by server only
+      const wifi_ssid = wifiStatus.connected ? wifiStatus.ssid : 
+                       (defaultWifi.ssid ? defaultWifi.ssid : null);
       
       // Convert capabilities object to array of strings
       const capabilitiesArray = [
@@ -63,14 +68,19 @@ export const registerDevice = async (retries = 3) => {
         mac_address: systemInfo.mac_address,
         serial_number: systemInfo.serial_number,
         capabilities: capabilitiesArray,
-        wifi_ssid: wifiStatus.connected ? wifiStatus.ssid : defaultWifi.ssid,
-        wifi_password: defaultWifi.password, // Send default WiFi password to DB
-        default_wifi_configured: true,
+        // Only send SSID, NOT password
+        wifi_ssid: wifi_ssid,
+        // DO NOT send wifi_password - server manages passwords
         ...(publicUrl && { rpi_serverUrl: publicUrl }) // Include public URL if available
       };
 
       logInfo(`📝 Attempting device registration with ID: ${RPI_ID}, Username: ${RPI_USERNAME}`);
-      logInfo(`📡 Default WiFi: ${defaultWifi.ssid}`);
+      
+      if (wifi_ssid) {
+        logInfo(`📡 Current WiFi: ${wifi_ssid}`);
+      } else {
+        logWarning(`⚠️ No WiFi connection available`);
+      }
       
       if (publicUrl) {
         logInfo(`🌐 Using public URL: ${publicUrl}`);
@@ -89,7 +99,10 @@ export const registerDevice = async (retries = 3) => {
 
       if (response.status === 200 || response.status === 201) {
         logSuccess(`✅ Device registered successfully with central server (ID: ${RPI_ID}, Username: ${RPI_USERNAME})`);
-        logSuccess(`📡 Default WiFi details saved to database: ${defaultWifi.ssid}`);
+        
+        if (wifi_ssid) {
+          logInfo(`📡 WiFi SSID sent to server (for reference only): ${wifi_ssid}`);
+        }
         
         if (publicUrl) {
           logSuccess(`🌐 Public URL saved to device: ${publicUrl}`);
@@ -137,6 +150,9 @@ async function trySimplifiedRegistration(attempt, publicUrl) {
     const wifiStatus = await wifiManager.getCurrentWifi();
     const defaultWifi = wifiManager.getDefaultWifi();
     
+    const wifi_ssid = wifiStatus.connected ? wifiStatus.ssid : 
+                     (defaultWifi.ssid ? defaultWifi.ssid : null);
+    
     const simplifiedPayload = {
       rpi_id: RPI_ID,
       rpi_name: RPI_USERNAME,
@@ -152,9 +168,7 @@ async function trySimplifiedRegistration(attempt, publicUrl) {
       location: "auto-detected",
       rpi_status: "active",
       last_seen: new Date().toISOString(),
-      wifi_ssid: wifiStatus.connected ? wifiStatus.ssid : defaultWifi.ssid,
-      wifi_password: defaultWifi.password,
-      default_wifi_configured: true,
+      wifi_ssid: wifi_ssid, // Only SSID, no password
       ...(publicUrl && { rpi_serverUrl: publicUrl })
     };
 
@@ -168,7 +182,11 @@ async function trySimplifiedRegistration(attempt, publicUrl) {
 
     if (response.status === 200) {
       logSuccess(`✅ Device registered via simplified payload (attempt ${attempt})`);
-      logSuccess(`📡 Default WiFi details saved: ${defaultWifi.ssid}`);
+      
+      if (wifi_ssid) {
+        logInfo(`📡 WiFi SSID sent: ${wifi_ssid}`);
+      }
+      
       if (publicUrl) {
         logSuccess(`🌐 Public URL saved: ${publicUrl}`);
       }
@@ -194,7 +212,6 @@ export const updateDeviceStatus = async (status = "active", systemInfo = null) =
     }
 
     const wifiStatus = await wifiManager.getCurrentWifi();
-    const defaultWifi = wifiManager.getDefaultWifi();
     
     // Try to get current public URL
     const publicUrl = await fetchPublicUrl(2, 3000);
@@ -213,8 +230,7 @@ export const updateDeviceStatus = async (status = "active", systemInfo = null) =
         username: systemInfo.username
       },
       last_seen: new Date().toISOString(),
-      wifi_ssid: wifiStatus.connected ? wifiStatus.ssid : defaultWifi.ssid,
-      default_wifi_available: true,
+      wifi_ssid: wifiStatus.connected ? wifiStatus.ssid : null,
       ...(publicUrl && { rpi_serverUrl: publicUrl })
     };
 

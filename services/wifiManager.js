@@ -11,8 +11,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const execAsync = promisify(exec);
 
-// Secure storage for installation WiFi only
-const WIFI_STORAGE_PATH = path.join(__dirname, '..', 'config', '.wifi_install');
+// Default WiFi credentials
+const DEFAULT_WIFI_SSID = "spotus";
+const DEFAULT_WIFI_PASSWORD = "123456789";
+
+// Local WiFi storage
+const LOCAL_WIFI_PATH = path.join(__dirname, '..', 'config', '.local_wifi.json');
 const ENCRYPTION_KEY_PATH = path.join(__dirname, '..', 'config', '.wifi_key');
 
 class WifiManager {
@@ -20,19 +24,20 @@ class WifiManager {
     this.isMonitoring = false;
     this.monitorInterval = null;
     this.connectionAttempts = 0;
-    this.maxConnectionAttempts = 3; // Reduced attempts
+    this.maxConnectionAttempts = 3;
     this.currentWifiSsid = null;
     this.serverWifiConfigured = false;
     this.lastServerCheck = null;
+    this.lastServerConfig = null;
     this.encryptionKey = this.getOrCreateEncryptionKey();
     this.isLinux = process.platform === 'linux';
     this.isMacOS = process.platform === 'darwin';
     
-    // Installation WiFi only - used during setup
-    this.installationWifi = null;
+    // Load local WiFi config
+    this.localWifiConfig = this.loadLocalWifiConfig();
   }
 
-  // Get or create encryption key for installation WiFi storage
+  // Get or create encryption key
   getOrCreateEncryptionKey() {
     try {
       if (fs.existsSync(ENCRYPTION_KEY_PATH)) {
@@ -57,8 +62,9 @@ class WifiManager {
     return result;
   }
 
-  // Simple XOR encryption for installation WiFi
+  // Simple XOR encryption
   encrypt(text) {
+    if (!text) return '';
     let result = '';
     for (let i = 0; i < text.length; i++) {
       const charCode = text.charCodeAt(i) ^ this.encryptionKey.charCodeAt(i % this.encryptionKey.length);
@@ -69,6 +75,7 @@ class WifiManager {
 
   decrypt(encryptedText) {
     try {
+      if (!encryptedText) return '';
       const decoded = Buffer.from(encryptedText, 'base64').toString();
       let result = '';
       for (let i = 0; i < decoded.length; i++) {
@@ -78,73 +85,260 @@ class WifiManager {
       return result;
     } catch (error) {
       logError('Decryption failed:', error);
-      return null;
+      return '';
     }
   }
 
-  // Store installation WiFi credentials (only for setup)
-  storeInstallationWifi(ssid, password) {
+  // Load local WiFi configuration
+  loadLocalWifiConfig() {
     try {
-      const installData = {
-        ssid: ssid,
-        password: this.encrypt(password),
-        timestamp: new Date().toISOString(),
-        source: 'installation',
-        note: 'For initial setup only'
-      };
+      if (fs.existsSync(LOCAL_WIFI_PATH)) {
+        const data = JSON.parse(fs.readFileSync(LOCAL_WIFI_PATH, 'utf8'));
+        
+        // Decrypt password
+        if (data.password_encrypted) {
+          data.password = this.decrypt(data.password_encrypted);
+        }
+        
+        logSuccess(`✅ Loaded local WiFi config: ${data.ssid}`);
+        return data;
+      }
+    } catch (error) {
+      logError('Error loading local WiFi config:', error);
+    }
+    
+    // Return default config if file doesn't exist
+    return this.createDefaultLocalWifi();
+  }
 
-      fs.writeFileSync(WIFI_STORAGE_PATH, JSON.stringify(installData, null, 2), {
+  // Create default local WiFi config
+  createDefaultLocalWifi() {
+    const defaultConfig = {
+      ssid: DEFAULT_WIFI_SSID,
+      password: DEFAULT_WIFI_PASSWORD,
+      source: 'default',
+      priority: 3, // Lowest priority
+      last_updated: new Date().toISOString(),
+      is_default: true
+    };
+    
+    this.saveLocalWifiConfig(defaultConfig);
+    return defaultConfig;
+  }
+
+  // Save local WiFi configuration
+  saveLocalWifiConfig(config) {
+    try {
+      const configToSave = {
+        ssid: config.ssid,
+        password_encrypted: this.encrypt(config.password),
+        source: config.source || 'local',
+        priority: config.priority || 1,
+        last_updated: new Date().toISOString(),
+        is_default: config.is_default || false,
+        note: config.note || 'Auto-saved by system'
+      };
+      
+      const configDir = path.dirname(LOCAL_WIFI_PATH);
+      if (!fs.existsSync(configDir)) {
+        fs.mkdirSync(configDir, { recursive: true });
+      }
+      
+      fs.writeFileSync(LOCAL_WIFI_PATH, JSON.stringify(configToSave, null, 2), {
         mode: 0o600
       });
-
-      this.installationWifi = { ssid, password };
-      logSuccess(`Installation WiFi stored: ${ssid}`);
+      
+      // Update in-memory config
+      this.localWifiConfig = {
+        ssid: config.ssid,
+        password: config.password,
+        source: config.source || 'local',
+        priority: config.priority || 1,
+        last_updated: configToSave.last_updated,
+        is_default: config.is_default || false
+      };
+      
+      logSuccess(`✅ Saved local WiFi config: ${config.ssid}`);
       return true;
     } catch (error) {
-      logError('Error storing installation WiFi:', error);
+      logError('Error saving local WiFi config:', error);
       return false;
     }
   }
 
-  // Get installation WiFi credentials
-  getInstallationWifi() {
-    try {
-      if (!fs.existsSync(WIFI_STORAGE_PATH)) {
-        return null;
-      }
+  // Get current WiFi config (combines all sources with priority)
+  getCurrentWifiConfig() {
+    const configs = [];
+    
+    // 1. Server config (highest priority - priority 1)
+    if (this.lastServerConfig && this.lastServerConfig.hasConfig) {
+      configs.push({
+        ssid: this.lastServerConfig.ssid,
+        password: this.lastServerConfig.password,
+        source: 'server',
+        priority: 1,
+        hasConfig: true
+      });
+    }
+    
+    // 2. Local stored config (priority 2)
+    if (this.localWifiConfig && this.localWifiConfig.ssid) {
+      configs.push({
+        ssid: this.localWifiConfig.ssid,
+        password: this.localWifiConfig.password,
+        source: this.localWifiConfig.source,
+        priority: this.localWifiConfig.priority || 2,
+        hasConfig: true
+      });
+    }
+    
+    // 3. Default config (lowest priority - priority 3)
+    configs.push({
+      ssid: DEFAULT_WIFI_SSID,
+      password: DEFAULT_WIFI_PASSWORD,
+      source: 'default',
+      priority: 3,
+      hasConfig: true
+    });
+    
+    // Sort by priority (lower number = higher priority)
+    configs.sort((a, b) => a.priority - b.priority);
+    
+    return configs[0]; // Return highest priority config
+  }
 
-      const installData = JSON.parse(fs.readFileSync(WIFI_STORAGE_PATH, 'utf8'));
-      if (installData && installData.password) {
-        const decryptedPassword = this.decrypt(installData.password);
-        if (decryptedPassword) {
-          this.installationWifi = {
-            ssid: installData.ssid,
-            password: decryptedPassword,
-            timestamp: installData.timestamp,
-            source: installData.source
-          };
-          return this.installationWifi;
+  // ===== MISSING METHODS ADDED BELOW =====
+  
+  // Helper method for compatibility with old code
+  getDefaultWifi() {
+    return {
+      ssid: DEFAULT_WIFI_SSID,
+      password: DEFAULT_WIFI_PASSWORD,
+      configured: true,
+      source: 'default',
+      hasPassword: true
+    };
+  }
+  
+  // Helper method for registration compatibility
+  getWifiInfoForRegistration() {
+    const config = this.getCurrentWifiConfig();
+    return {
+      ssid: config ? config.ssid : DEFAULT_WIFI_SSID,
+      password: config ? config.password : DEFAULT_WIFI_PASSWORD,
+      configured: true,
+      source: config ? config.source : 'default',
+      hasPassword: true
+    };
+  }
+  
+  // Disconnect from current WiFi
+  async disconnectWifi() {
+    try {
+      const currentWifi = await this.getCurrentWifi();
+      
+      if (currentWifi.connected) {
+        if (this.isLinux) {
+          await execAsync(`nmcli connection down "${currentWifi.ssid}"`);
+        } else if (this.isMacOS) {
+          await execAsync('networksetup -setairportpower en0 off');
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          await execAsync('networksetup -setairportpower en0 on');
+        }
+        
+        logInfo(`Disconnected from WiFi: ${currentWifi.ssid}`);
+        this.currentWifiSsid = null;
+        
+        return {
+          success: true,
+          message: `Disconnected from ${currentWifi.ssid}`,
+          ssid: currentWifi.ssid
+        };
+      } else {
+        return {
+          success: true,
+          message: 'Not connected to any WiFi'
+        };
+      }
+    } catch (error) {
+      logError('Error disconnecting WiFi:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+  
+  // Get current WiFi on macOS (missing implementation)
+  async getCurrentWifiMacOS() {
+    try {
+      const { stdout } = await execAsync('/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I');
+      const lines = stdout.split('\n');
+      
+      let ssid = null;
+      for (const line of lines) {
+        if (line.includes(' SSID:')) {
+          ssid = line.split(':')[1].trim();
+          break;
         }
       }
-      return null;
-    } catch (error) {
-      logError('Error reading installation WiFi:', error);
-      return null;
-    }
-  }
-
-  // Clear installation WiFi storage
-  clearInstallationWifi() {
-    try {
-      if (fs.existsSync(WIFI_STORAGE_PATH)) {
-        fs.unlinkSync(WIFI_STORAGE_PATH);
+      
+      if (ssid) {
+        return {
+          connected: true,
+          ssid: ssid,
+          signal: 100,
+          ipAddress: await this.getIpAddress(),
+          state: 'connected'
+        };
+      } else {
+        return {
+          connected: false,
+          ssid: null,
+          signal: 0,
+          state: 'disconnected'
+        };
       }
-      this.installationWifi = null;
-      logInfo('Installation WiFi credentials cleared');
     } catch (error) {
-      logError('Error clearing installation WiFi:', error);
+      return {
+        connected: false,
+        ssid: null,
+        signal: 0,
+        error: error.message
+      };
     }
   }
+  
+  // Get IP address
+  async getIpAddress() {
+    try {
+      if (this.isLinux) {
+        const { stdout } = await execAsync("hostname -I | awk '{print $1}'");
+        return stdout.trim();
+      } else if (this.isMacOS) {
+        const { stdout } = await execAsync("ipconfig getifaddr en0");
+        return stdout.trim();
+      }
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+  
+  // Get WiFi signal strength
+  async getWifiSignal(ssid) {
+    try {
+      if (this.isLinux) {
+        const { stdout } = await execAsync(`nmcli -t -f ssid,signal dev wifi | grep "${ssid}:" | cut -d: -f2`);
+        return parseInt(stdout.trim()) || 0;
+      } else {
+        return 80;
+      }
+    } catch (error) {
+      return 0;
+    }
+  }
+  // ===== END OF MISSING METHODS =====
 
   // Check if NetworkManager is available
   async checkNetworkManager() {
@@ -161,10 +355,10 @@ class WifiManager {
   async fetchWifiFromServer() {
     try {
       const axios = await import('axios');
-      logInfo(`Fetching WiFi configuration from central server for device: ${RPI_ID}`);
+      logInfo(`📡 Fetching WiFi configuration from central server for device: ${RPI_ID}`);
       
-      const response = await axios.default.get(`${SERVER_URL}/api/devices/wifi-config/${RPI_ID}`, {
-        timeout: 10000, // Reduced timeout
+      const response = await axios.default.get(`${SERVER_URL}/api/wifi-config/${RPI_ID}`, {
+        timeout: 10000,
         headers: {
           'User-Agent': `ADS-Display/${RPI_ID}`,
           'Accept': 'application/json'
@@ -173,7 +367,31 @@ class WifiManager {
 
       if (response.data.success && response.data.has_wifi_config) {
         const { wifi_ssid, wifi_password } = response.data;
-        logSuccess(`Received WiFi configuration from server: ${wifi_ssid}`);
+        
+        // Store server config
+        this.lastServerConfig = {
+          ssid: wifi_ssid,
+          password: wifi_password,
+          hasConfig: true,
+          lastFetched: new Date()
+        };
+        
+        // Check if different from local config
+        const localConfig = this.localWifiConfig;
+        if (localConfig && localConfig.ssid === wifi_ssid && localConfig.password === wifi_password) {
+          logInfo(`📡 Server WiFi config matches local: ${wifi_ssid}`);
+        } else {
+          logInfo(`📡 Server WiFi config differs from local. Updating local storage...`);
+          
+          // Update local storage with server config
+          this.saveLocalWifiConfig({
+            ssid: wifi_ssid,
+            password: wifi_password,
+            source: 'server',
+            priority: 1,
+            note: 'Synced from central server'
+          });
+        }
         
         this.serverWifiConfigured = true;
         this.lastServerCheck = new Date();
@@ -185,8 +403,14 @@ class WifiManager {
           source: 'server',
           hasConfig: true
         };
-      } else {
-        logInfo('No WiFi configuration found on central server');
+      } else if (response.data.success && !response.data.has_wifi_config) {
+        logInfo('📡 No WiFi configuration found on central server');
+        
+        this.lastServerConfig = {
+          hasConfig: false,
+          lastFetched: new Date()
+        };
+        
         this.serverWifiConfigured = false;
         this.lastServerCheck = new Date();
         
@@ -195,9 +419,18 @@ class WifiManager {
           hasConfig: false,
           source: 'server'
         };
+      } else {
+        throw new Error(`Server returned success=false`);
       }
     } catch (error) {
-      logError('Failed to fetch WiFi configuration from server:', error.message);
+      logError('❌ Failed to fetch WiFi configuration from server:', error.message);
+      
+      this.lastServerConfig = {
+        hasConfig: false,
+        error: error.message,
+        lastFetched: new Date()
+      };
+      
       this.serverWifiConfigured = false;
       this.lastServerCheck = new Date();
       
@@ -212,7 +445,7 @@ class WifiManager {
   // Connect to WiFi
   async connectToWifi(ssid, password, source = 'unknown') {
     try {
-      logInfo(`Attempting to connect to WiFi: ${ssid} (Source: ${source})`);
+      logInfo(`🔗 Attempting to connect to WiFi: ${ssid} (Source: ${source})`);
       
       if (!ssid || !password) {
         throw new Error('SSID and password are required');
@@ -245,7 +478,7 @@ class WifiManager {
       }
 
     } catch (error) {
-      logError(`Failed to connect to WiFi ${ssid}:`, error.message);
+      logError(`❌ Failed to connect to WiFi ${ssid}:`, error.message);
       this.connectionAttempts++;
       
       return {
@@ -276,7 +509,7 @@ class WifiManager {
       // Connect to WiFi
       const { stdout, stderr } = await execAsync(
         `nmcli device wifi connect "${ssid}" password "${password}"`,
-        { timeout: 20000 } // Reduced timeout
+        { timeout: 20000 }
       );
 
       if (stderr && !stdout.includes('successfully activated')) {
@@ -296,7 +529,7 @@ class WifiManager {
   // macOS WiFi connection
   async connectToWifiMacOS(ssid, password) {
     try {
-      logInfo(`Connecting to WiFi on macOS: ${ssid}`);
+      logInfo(`🔗 Connecting to WiFi on macOS: ${ssid}`);
       
       const commands = [
         `networksetup -setairportnetwork en0 "${ssid}" "${password}"`,
@@ -385,113 +618,6 @@ class WifiManager {
     }
   }
 
-  // Get current WiFi on macOS
-  async getCurrentWifiMacOS() {
-    try {
-      const { stdout } = await execAsync('/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I');
-      const lines = stdout.split('\n');
-      
-      let ssid = null;
-      for (const line of lines) {
-        if (line.includes(' SSID:')) {
-          ssid = line.split(':')[1].trim();
-          break;
-        }
-      }
-      
-      if (ssid) {
-        return {
-          connected: true,
-          ssid: ssid,
-          signal: 100,
-          ipAddress: await this.getIpAddress(),
-          state: 'connected'
-        };
-      } else {
-        return {
-          connected: false,
-          ssid: null,
-          signal: 0,
-          state: 'disconnected'
-        };
-      }
-    } catch (error) {
-      return {
-        connected: false,
-        ssid: null,
-        signal: 0,
-        error: error.message
-      };
-    }
-  }
-
-  // Get IP address
-  async getIpAddress() {
-    try {
-      if (this.isLinux) {
-        const { stdout } = await execAsync("hostname -I | awk '{print $1}'");
-        return stdout.trim();
-      } else if (this.isMacOS) {
-        const { stdout } = await execAsync("ipconfig getifaddr en0");
-        return stdout.trim();
-      }
-      return null;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  // Get WiFi signal strength
-  async getWifiSignal(ssid) {
-    try {
-      if (this.isLinux) {
-        const { stdout } = await execAsync(`nmcli -t -f ssid,signal dev wifi | grep "${ssid}:" | cut -d: -f2`);
-        return parseInt(stdout.trim()) || 0;
-      } else {
-        return 80;
-      }
-    } catch (error) {
-      return 0;
-    }
-  }
-
-  // Disconnect from current WiFi
-  async disconnectWifi() {
-    try {
-      const currentWifi = await this.getCurrentWifi();
-      
-      if (currentWifi.connected) {
-        if (this.isLinux) {
-          await execAsync(`nmcli connection down "${currentWifi.ssid}"`);
-        } else if (this.isMacOS) {
-          await execAsync('networksetup -setairportpower en0 off');
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          await execAsync('networksetup -setairportpower en0 on');
-        }
-        
-        logInfo(`Disconnected from WiFi: ${currentWifi.ssid}`);
-        this.currentWifiSsid = null;
-        
-        return {
-          success: true,
-          message: `Disconnected from ${currentWifi.ssid}`,
-          ssid: currentWifi.ssid
-        };
-      } else {
-        return {
-          success: true,
-          message: 'Not connected to any WiFi'
-        };
-      }
-    } catch (error) {
-      logError('Error disconnecting WiFi:', error);
-      return {
-        success: false,
-        error: error.message
-      };
-    }
-  }
-
   // Test internet connectivity
   async testInternet() {
     const testEndpoints = [
@@ -512,95 +638,63 @@ class WifiManager {
     return false;
   }
 
-  // Main WiFi control logic - UPDATED per requirements
+  // Main WiFi control logic
   async controlWifi() {
     try {
       logInfo('🔄 Starting WiFi control cycle...');
       
-      // Step 1: Get current WiFi connection
+      // Step 1: Get current status
       const currentWifi = await this.getCurrentWifi();
       const hasInternet = await this.testInternet();
       
-      logInfo(`Current: WiFi=${currentWifi.ssid || 'None'}, Internet=${hasInternet}`);
+      logInfo(`📊 Current: WiFi=${currentWifi.ssid || 'None'}, Internet=${hasInternet}`);
       
-      // Step 2: Fetch WiFi configuration from server
-      const serverConfig = await this.fetchWifiFromServer();
-      
-      if (!serverConfig.success) {
-        // If can't reach server, continue with current WiFi
-        logWarning('Cannot reach server, continuing with current WiFi');
-        return;
+      // Step 2: Try to fetch from server (if internet is available)
+      let serverConfig = null;
+      if (hasInternet) {
+        serverConfig = await this.fetchWifiFromServer();
+      } else {
+        logInfo('🌐 No internet - using local WiFi config');
       }
       
-      // Step 3: Apply logic based on server configuration
-      if (serverConfig.hasConfig) {
-        // Server has WiFi configuration
-        if (currentWifi.ssid === serverConfig.ssid) {
-          // Already connected to server WiFi
-          if (hasInternet) {
-            logInfo(`✅ Connected to server WiFi (${serverConfig.ssid}) with internet`);
-          } else {
-            logWarning(`⚠️ Connected to server WiFi but no internet - will retry`);
-            // Reconnect to server WiFi
-            await this.disconnectWifi();
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            await this.connectToWifi(serverConfig.ssid, serverConfig.password, 'server-retry');
-          }
+      // Step 3: Get the best WiFi config to use
+      const wifiConfig = this.getCurrentWifiConfig();
+      logInfo(`📡 Using WiFi config: ${wifiConfig.ssid} (Source: ${wifiConfig.source})`);
+      
+      // Step 4: Check if we need to connect/reconnect
+      if (currentWifi.ssid === wifiConfig.ssid) {
+        // Already connected to target WiFi
+        if (hasInternet) {
+          logInfo(`✅ Connected to ${wifiConfig.ssid} with internet`);
         } else {
-          // Connected to different WiFi - switch to server WiFi
-          logInfo(`🔄 Switching to server WiFi: ${serverConfig.ssid}`);
-          
-          // Try to connect to server WiFi
-          const connectResult = await this.connectToWifi(
-            serverConfig.ssid, 
-            serverConfig.password, 
-            'server'
-          );
-          
-          if (connectResult.success) {
-            logSuccess(`✅ Connected to server WiFi: ${serverConfig.ssid}`);
-          } else {
-            logError(`❌ Failed to connect to server WiFi: ${connectResult.error}`);
-            
-            // If server WiFi fails, try to reconnect to current WiFi
-            if (currentWifi.connected) {
-              logInfo(`🔄 Reconnecting to previous WiFi: ${currentWifi.ssid}`);
-              
-              // Try installation WiFi first
-              const installWifi = this.getInstallationWifi();
-              if (installWifi) {
-                await this.connectToWifi(installWifi.ssid, installWifi.password, 'installation-fallback');
-              }
-            }
-          }
+          logWarning(`⚠️ Connected to ${wifiConfig.ssid} but no internet`);
+          // Try reconnecting
+          await this.disconnectWifi();
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          await this.connectToWifi(wifiConfig.ssid, wifiConfig.password, `${wifiConfig.source}-retry`);
         }
       } else {
-        // Server has no WiFi configuration
-        logInfo('ℹ️ No WiFi configuration on server');
+        // Not connected or connected to different WiFi
+        logInfo(`🔄 Switching to WiFi: ${wifiConfig.ssid} (${wifiConfig.source})`);
         
         if (currentWifi.connected) {
-          // Continue with current WiFi
-          if (hasInternet) {
-            logInfo(`✅ Continuing with current WiFi: ${currentWifi.ssid}`);
-          } else {
-            logWarning(`⚠️ No internet on current WiFi: ${currentWifi.ssid}`);
-            
-            // Try installation WiFi if available
-            const installWifi = this.getInstallationWifi();
-            if (installWifi && currentWifi.ssid !== installWifi.ssid) {
-              logInfo(`🔄 Trying installation WiFi: ${installWifi.ssid}`);
-              await this.connectToWifi(installWifi.ssid, installWifi.password, 'installation-retry');
-            }
-          }
+          await this.disconnectWifi();
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+        
+        const connectResult = await this.connectToWifi(
+          wifiConfig.ssid, 
+          wifiConfig.password, 
+          wifiConfig.source
+        );
+        
+        if (connectResult.success) {
+          logSuccess(`✅ Connected to ${wifiConfig.ssid}`);
         } else {
-          // Not connected to any WiFi - try installation WiFi
-          const installWifi = this.getInstallationWifi();
-          if (installWifi) {
-            logInfo(`🔄 Connecting to installation WiFi: ${installWifi.ssid}`);
-            await this.connectToWifi(installWifi.ssid, installWifi.password, 'installation');
-          } else {
-            logWarning('⚠️ No WiFi connection available');
-          }
+          logError(`❌ Failed to connect to ${wifiConfig.ssid}: ${connectResult.error}`);
+          
+          // Try next priority config
+          await this.tryFallbackConnection();
         }
       }
       
@@ -612,9 +706,76 @@ class WifiManager {
         this.connectionAttempts = 0;
       }
       
+      // Log summary
+      logInfo(`📊 WiFi Cycle Complete: Connected=${finalWifi.connected}, Internet=${finalInternet}`);
+      
     } catch (error) {
-      logError('WiFi control error:', error);
+      logError('❌ WiFi control error:', error);
       this.connectionAttempts++;
+      
+      // Try fallback on error
+      if (this.connectionAttempts >= this.maxConnectionAttempts) {
+        logWarning(`🔄 Max attempts reached, trying fallback...`);
+        await this.tryFallbackConnection();
+      }
+    }
+  }
+
+  // Try fallback connection
+  async tryFallbackConnection() {
+    try {
+      logInfo('🔄 Trying fallback WiFi connection...');
+      
+      // Get all available configs
+      const configs = [
+        // Server config
+        ...(this.lastServerConfig && this.lastServerConfig.hasConfig ? [{
+          ssid: this.lastServerConfig.ssid,
+          password: this.lastServerConfig.password,
+          source: 'server-fallback',
+          priority: 1
+        }] : []),
+        
+        // Local config
+        ...(this.localWifiConfig && this.localWifiConfig.ssid ? [{
+          ssid: this.localWifiConfig.ssid,
+          password: this.localWifiConfig.password,
+          source: this.localWifiConfig.source,
+          priority: this.localWifiConfig.priority || 2
+        }] : []),
+        
+        // Default config
+        {
+          ssid: DEFAULT_WIFI_SSID,
+          password: DEFAULT_WIFI_PASSWORD,
+          source: 'default-fallback',
+          priority: 3
+        }
+      ];
+      
+      // Sort by priority
+      configs.sort((a, b) => a.priority - b.priority);
+      
+      // Try each config
+      for (const config of configs) {
+        try {
+          logInfo(`🔄 Trying fallback: ${config.ssid}`);
+          const result = await this.connectToWifi(config.ssid, config.password, config.source);
+          if (result.success) {
+            logSuccess(`✅ Fallback successful: ${config.ssid}`);
+            return true;
+          }
+        } catch (error) {
+          continue;
+        }
+      }
+      
+      logError('❌ All fallback attempts failed');
+      return false;
+      
+    } catch (error) {
+      logError('Fallback connection error:', error);
+      return false;
     }
   }
 
@@ -628,20 +789,17 @@ class WifiManager {
     this.isMonitoring = true;
     logInfo('🚀 Starting WiFi monitoring service');
 
-    // Load installation WiFi if exists
-    this.getInstallationWifi();
-
-    // Initial control after 10 seconds
+    // Initial control after 5 seconds
     setTimeout(() => {
       this.controlWifi();
-    }, 10000);
+    }, 5000);
 
-    // Monitor every minute (60 seconds)
+    // Monitor every 30 seconds
     this.monitorInterval = setInterval(() => {
       this.controlWifi();
-    }, 60000);
+    }, 30000);
 
-    logSuccess('✅ WiFi monitoring started (checks every 60 seconds)');
+    logSuccess('✅ WiFi monitoring started (checks every 30 seconds)');
   }
 
   // Stop WiFi monitoring
@@ -655,20 +813,22 @@ class WifiManager {
     logInfo('🛑 WiFi monitoring stopped');
   }
 
-  // Manual connection for installation
-  async manualConnect(ssid, password) {
+  // Manual connection and save
+  async manualConnectAndSave(ssid, password, source = 'manual') {
     try {
-      logInfo(`Manual connection for installation: ${ssid}`);
+      logInfo(`🔧 Manual WiFi setup: ${ssid}`);
       
-      // Store as installation WiFi
-      this.storeInstallationWifi(ssid, password);
+      // Save to local storage
+      this.saveLocalWifiConfig({
+        ssid: ssid,
+        password: password,
+        source: source,
+        priority: 1,
+        note: 'Manually configured'
+      });
       
       // Connect
-      const result = await this.connectToWifi(ssid, password, 'installation');
-      
-      if (result.success) {
-        logSuccess(`✅ Installation connection successful: ${ssid}`);
-      }
+      const result = await this.connectToWifi(ssid, password, source);
       
       return result;
     } catch (error) {
@@ -680,6 +840,42 @@ class WifiManager {
     }
   }
 
+  // Get WiFi info for API
+  getWifiInfo() {
+    return {
+      current: this.currentWifiSsid,
+      local_config: {
+        ssid: this.localWifiConfig.ssid,
+        source: this.localWifiConfig.source,
+        last_updated: this.localWifiConfig.last_updated,
+        is_default: this.localWifiConfig.is_default
+      },
+      server_config: this.lastServerConfig,
+      default_config: {
+        ssid: DEFAULT_WIFI_SSID,
+        source: 'default'
+      },
+      monitoring: this.isMonitoring
+    };
+  }
+
+  // API: Get current WiFi status
+  async getWifiStatus() {
+    const currentWifi = await this.getCurrentWifi();
+    const hasInternet = await this.testInternet();
+    
+    return {
+      current_wifi: currentWifi,
+      internet: hasInternet,
+      local_config: {
+        ssid: this.localWifiConfig.ssid,
+        source: this.localWifiConfig.source
+      },
+      server_config: this.lastServerConfig,
+      monitoring: this.getMonitoringStatus()
+    };
+  }
+
   // Get monitoring status
   getMonitoringStatus() {
     return {
@@ -689,12 +885,12 @@ class WifiManager {
       currentWifiSsid: this.currentWifiSsid,
       serverWifiConfigured: this.serverWifiConfigured,
       lastServerCheck: this.lastServerCheck,
-      hasInstallationWifi: this.installationWifi !== null,
-      platform: process.platform,
-      checkInterval: '60 seconds'
+      hasLocalConfig: !!(this.localWifiConfig && this.localWifiConfig.ssid),
+      checkInterval: '30 seconds',
+      nextCheckIn: this.monitorInterval ? '30 seconds' : 'Not monitoring'
     };
   }
-
+  
   // Scan networks (optional)
   async scanNetworks() {
     try {
