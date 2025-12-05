@@ -161,7 +161,6 @@ class HybridUpdateService {
   async checkHealthEndpoint() {
     try {
       // Use the public health endpoint to check server connectivity
-      // This doesn't return version info, but ensures server is reachable
       const response = await axios.get(`${SERVER_URL}/api/health`, {
         timeout: 10000,
         headers: {
@@ -169,8 +168,6 @@ class HybridUpdateService {
         }
       });
       
-      // If server is reachable but we don't have version info from server,
-      // we'll rely on GitHub for version checks
       return {
         updateAvailable: false,
         latestVersion: this.currentVersion,
@@ -185,8 +182,7 @@ class HybridUpdateService {
 
   async checkSimpleVersion() {
     try {
-      // Simple version file check - create a public version endpoint on your server if needed
-      // For now, just return current version
+      // Simple version file check
       return {
         updateAvailable: false,
         latestVersion: this.currentVersion,
@@ -206,7 +202,7 @@ class HybridUpdateService {
     }
 
     // Get the application directory dynamically
-    const appDir = process.cwd(); // This gets the current working directory
+    const appDir = process.cwd();
     const backupDir = `/tmp/ads-display-backup-${Date.now()}`;
     
     try {
@@ -227,17 +223,19 @@ class HybridUpdateService {
         throw new Error('Git update failed');
       }
 
-      // Step 3: Verify update
+      // Step 3: Install dependencies and run setup scripts
+      await this.installDependenciesAndSetup(appDir);
+
+      // Step 4: Verify update
       const newVersion = this.getCurrentVersion();
       if (newVersion !== updateInfo.latestVersion) {
         logWarning(`Version mismatch after update. Expected: ${updateInfo.latestVersion}, Got: ${newVersion}`);
-        // Don't throw error here, just log warning
       }
 
-      // Step 4: Update device registration with new version
+      // Step 5: Update device registration with new version
       await this.updateDeviceVersion(newVersion);
 
-      // Step 5: Notify success
+      // Step 6: Notify success
       this.publishUpdateStatus('update_completed', {
         fromVersion: this.currentVersion,
         toVersion: updateInfo.latestVersion || newVersion
@@ -245,9 +243,8 @@ class HybridUpdateService {
 
       logSuccess(`✅ Update successful! Version: ${newVersion}`);
 
-      // Step 6: Restart application (optional - comment out for testing)
-      logInfo("Update completed. Manual restart may be required.");
-      // await this.restartApplication();
+      // Step 7: Schedule reboot (after 1 minute to allow cleanup)
+      await this.scheduleReboot();
 
       return true;
 
@@ -325,18 +322,9 @@ class HybridUpdateService {
       const { stdout: gitLog } = await execAsync(`cd "${gitDir}" && git log --oneline -1`);
       logInfo(`Latest commit: ${gitLog.trim()}`);
       
-      // Install dependencies if package.json exists
-      const packageJsonPath = path.join(gitDir, 'package.json');
-      if (fs.existsSync(packageJsonPath)) {
-        logInfo("Installing dependencies...");
-        await execAsync(`cd "${gitDir}" && npm ci --only=production`);
-        logSuccess("Dependencies installed successfully");
-      }
-      
       return true;
     } catch (error) {
       logError("Git update failed:", error.message);
-      logError("Error details:", error);
       
       // Provide helpful debugging info
       try {
@@ -350,6 +338,63 @@ class HybridUpdateService {
       }
       
       return false;
+    }
+  }
+
+  async installDependenciesAndSetup(appDir) {
+    try {
+      logInfo("📦 Installing Node.js dependencies...");
+      
+      // Install npm dependencies
+      await execAsync(`cd "${appDir}" && npm install --production`);
+      logSuccess("✅ Node.js dependencies installed");
+      
+      // Check if install_dependencies.sh exists
+      const installScriptPath = path.join(appDir, 'install_dependencies.sh');
+      if (fs.existsSync(installScriptPath)) {
+        logInfo("🔧 Running install_dependencies.sh...");
+        
+        // Make the script executable
+        await execAsync(`chmod +x "${installScriptPath}"`);
+        
+        // Run the script
+        await execAsync(`cd "${appDir}" && ./install_dependencies.sh`);
+        logSuccess("✅ Install dependencies script completed");
+      } else {
+        logInfo("⚠️ No install_dependencies.sh found, skipping");
+      }
+      
+    } catch (error) {
+      logError("❌ Dependencies installation failed:", error.message);
+      throw error;
+    }
+  }
+
+  async scheduleReboot() {
+    try {
+      logInfo("🔄 Scheduling Raspberry Pi reboot in 1 minute...");
+      
+      // Schedule reboot using at command (if available) or shutdown
+      try {
+        // Try using at command
+        await execAsync('echo "sudo reboot" | at now + 1 minute 2>/dev/null');
+        logInfo("✅ Reboot scheduled via at command");
+      } catch (atError) {
+        // Fallback to direct shutdown command
+        logInfo("Using direct shutdown command...");
+        await execAsync('sudo shutdown -r +1 "System update completed, rebooting..."');
+        logInfo("✅ Reboot scheduled via shutdown command");
+      }
+      
+      // Send final status before reboot
+      this.publishUpdateStatus('reboot_scheduled', {
+        message: 'System will reboot in 1 minute',
+        timestamp: new Date().toISOString()
+      });
+      
+    } catch (error) {
+      logError("❌ Failed to schedule reboot:", error.message);
+      logInfo("⚠️ Manual reboot required after update");
     }
   }
 
@@ -368,9 +413,9 @@ class HybridUpdateService {
         }
       });
       
-      logInfo("Device version updated on central server");
+      logInfo("✅ Device version updated on central server");
     } catch (error) {
-      logWarning("Could not update device version on server:", error.message);
+      logWarning("⚠️ Could not update device version on server:", error.message);
     }
   }
 
@@ -378,9 +423,9 @@ class HybridUpdateService {
     try {
       await execAsync(`mkdir -p "${backupDir}"`);
       await execAsync(`cp -r "${sourceDir}"/* "${backupDir}"/ 2>/dev/null || true`);
-      logSuccess("Backup created successfully");
+      logSuccess("✅ Backup created successfully");
     } catch (error) {
-      logWarning("Backup creation had issues:", error.message);
+      logWarning("⚠️ Backup creation had issues:", error.message);
     }
   }
 
@@ -389,18 +434,18 @@ class HybridUpdateService {
     try {
       await execAsync(`rm -rf "${sourceDir}"/* 2>/dev/null || true`);
       await execAsync(`cp -r "${backupDir}"/* "${sourceDir}"/ 2>/dev/null || true`);
-      await execAsync(`cd "${sourceDir}" && npm install --production`);
-      logSuccess("Backup restored successfully");
+      logSuccess("✅ Backup restored successfully");
     } catch (error) {
-      logError("Backup restore failed:", error.message);
+      logError("❌ Backup restore failed:", error.message);
     }
   }
 
   async cleanupBackup(backupDir) {
     try {
       await execAsync(`rm -rf "${backupDir}"`);
+      logInfo("🧹 Backup cleaned up");
     } catch (error) {
-      logWarning("Backup cleanup failed:", error.message);
+      logWarning("⚠️ Backup cleanup failed:", error.message);
     }
   }
 
@@ -408,28 +453,28 @@ class HybridUpdateService {
     logInfo("🔄 Restarting application...");
 
     const restartMethods = [
-      () => execAsync("pm2 restart ads-display"), // PM2
-      () => execAsync("sudo systemctl restart ads-display"), // Systemd
+      () => execAsync("pm2 restart ads-display 2>/dev/null"), // PM2
+      () => execAsync("sudo systemctl restart ads-display 2>/dev/null"), // Systemd
       () => this.killAndRestart() // Fallback
     ];
 
     for (const method of restartMethods) {
       try {
         await method();
-        logSuccess("Application restarted successfully");
+        logSuccess("✅ Application restarted successfully");
         return;
       } catch (error) {
-        logWarning(`Restart method failed: ${error.message}`);
+        logWarning(`⚠️ Restart method failed: ${error.message}`);
         continue;
       }
     }
 
-    throw new Error("All restart methods failed");
+    logError("❌ All restart methods failed");
   }
 
   async killAndRestart() {
     try {
-      await execAsync("pkill -f 'node server.js'");
+      await execAsync("pkill -f 'node server.js' 2>/dev/null || true");
       await new Promise(resolve => setTimeout(resolve, 5000));
       
       const appDir = process.cwd();
@@ -451,9 +496,49 @@ class HybridUpdateService {
       try {
         mqttService.publishUpdateStatus(status, data);
       } catch (error) {
-        logError("Failed to publish MQTT update status:", error);
+        logError("❌ Failed to publish MQTT update status:", error);
       }
     }
+  }
+
+  // API endpoint for manual update
+  async updateViaAPI(req, res) {
+    try {
+      logInfo("📱 Manual update requested via API");
+      
+      const updateResult = await this.manualUpdate();
+      
+      if (updateResult) {
+        res.json({
+          success: true,
+          message: "Update initiated successfully. System will reboot in 1 minute.",
+          currentVersion: this.currentVersion
+        });
+      } else {
+        res.status(500).json({
+          success: false,
+          message: "Update failed",
+          currentVersion: this.currentVersion
+        });
+      }
+    } catch (error) {
+      logError("❌ API update error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Update failed: " + error.message
+      });
+    }
+  }
+
+  // Get update status
+  getUpdateStatus(req, res) {
+    res.json({
+      success: true,
+      currentVersion: this.currentVersion,
+      updateAvailable: this.updateAvailable,
+      lastChecked: this.lastChecked,
+      checkInterval: this.checkInterval / 60000 // Convert to minutes
+    });
   }
 }
 

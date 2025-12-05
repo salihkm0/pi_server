@@ -18,7 +18,7 @@ PLAYLIST="$VIDEO_DIR/playlist.txt"
 MPV_SOCKET="/tmp/mpv-socket"
 LOG_FILE="$BASE_DIR/logs/ads_display.log"
 CONFIG_FILE="$BASE_DIR/config/device-config.json"
-WIFI_CONFIG_FILE="$BASE_DIR/config/.local_wifi.json"  # Changed to match new system
+WIFI_CONFIG_FILE="$BASE_DIR/config/wifi-config.json"
 
 # Get current username
 USERNAME=$(whoami)
@@ -47,7 +47,7 @@ export DISPLAY=:0
 
 # Default WiFi credentials (fallback)
 DEFAULT_WIFI_SSID="spotus"
-DEFAULT_WIFI_PASSWORD="123456789"
+DEFAULT_WIFI_PASSWORD="spotus@123"
 
 # Function to check if we're on Raspberry Pi Lite
 is_lite_version() {
@@ -92,13 +92,19 @@ start_xserver() {
         echo "Starting X server..."
         
         # Start X server with proper configuration for headless mode
-        sudo X :0 -ac -nocursor -retro > /dev/null 2>&1 &
+        # Use different method for better compatibility
+        if [ -f /usr/bin/startx ]; then
+            startx -- -nocursor -retro > /dev/null 2>&1 &
+        else
+            sudo X :0 -ac -nocursor -retro > /dev/null 2>&1 &
+        fi
+        
         local xserver_pid=$!
         
         echo "X server started with PID: $xserver_pid"
         
         # Wait for X server to be ready with better detection
-        local max_attempts=20
+        local max_attempts=30  # Increased attempts
         local attempt=1
         
         while [[ $attempt -le $max_attempts ]]; do
@@ -110,6 +116,9 @@ start_xserver() {
                 xset -dpms 2>/dev/null || true
                 xset s noblank 2>/dev/null || true
                 
+                # Additional X configuration for better performance
+                xsetroot -solid black 2>/dev/null || true
+                
                 return 0
             fi
             
@@ -118,134 +127,68 @@ start_xserver() {
                 echo "Warning: X server process died, attempting alternative startup..."
                 
                 # Try alternative method
-                startx -- -nocursor -retro > /dev/null 2>&1 &
-                local new_pid=$!
-                echo "Alternative X server started with PID: $new_pid"
-                xserver_pid=$new_pid
+                if [ -f /usr/bin/X ]; then
+                    /usr/bin/X :0 -ac -nocursor -retro > /dev/null 2>&1 &
+                    local new_pid=$!
+                    echo "Alternative X server started with PID: $new_pid"
+                    xserver_pid=$new_pid
+                fi
             fi
             
             echo "Waiting for X server... (attempt $attempt/$max_attempts)"
-            sleep 2
+            sleep 3  # Increased wait time
             ((attempt++))
         done
         
         echo "Warning: X server not ready after $max_attempts attempts"
-        echo "Continuing without X server - video playback will be disabled"
+        echo "Trying one more time with different parameters..."
+        
+        # Last attempt with different parameters
+        startx -- -nocursor -retro -depth 24 > /dev/null 2>&1 &
+        sleep 5
+        
+        if is_xserver_running; then
+            echo "X server finally started!"
+            return 0
+        fi
+        
+        echo "Error: X server not available. Cannot start MPV."
         return 1
     fi
     return 0
 }
 
-# Function to scan for available WiFi networks
-scan_wifi_networks() {
-    echo "Scanning for available WiFi networks..."
+# Function to create default WiFi configuration
+create_default_wifi_config() {
+    echo "Creating default WiFi configuration..."
     
-    if ! command -v nmcli &> /dev/null; then
-        echo "NetworkManager not available for scanning"
-        return 1
-    fi
+    local default_config='{
+        "ssid": "'$DEFAULT_WIFI_SSID'",
+        "password": "'$DEFAULT_WIFI_PASSWORD'",
+        "is_default": true,
+        "auto_connect": true,
+        "created_at": "'$(date -Iseconds)'",
+        "updated_at": "'$(date -Iseconds)'"
+    }'
     
-    # Scan for networks
-    nmcli device wifi rescan 2>/dev/null
-    sleep 5
-    
-    # List available networks
-    local available_networks=$(nmcli -t -f SSID device wifi list | sort | uniq)
-    
-    if [[ -n "$available_networks" ]]; then
-        echo "Available WiFi networks:"
-        echo "$available_networks"
-        return 0
-    else
-        echo "No WiFi networks found"
-        return 1
-    fi
+    echo "$default_config" > "$WIFI_CONFIG_FILE"
+    chmod 600 "$WIFI_CONFIG_FILE"
+    echo "Default WiFi configuration created."
 }
 
-# Function to create or update local WiFi configuration
-create_or_update_local_wifi() {
-    echo "Checking local WiFi configuration..."
-    
-    if [[ ! -f "$WIFI_CONFIG_FILE" ]]; then
-        echo "Creating new local WiFi configuration..."
-        
-        local default_config='{
-            "ssid": "'$DEFAULT_WIFI_SSID'",
-            "password_encrypted": "",
-            "source": "default",
-            "priority": 3,
-            "last_updated": "'$(date -Iseconds)'",
-            "is_default": true,
-            "note": "Auto-created default WiFi config"
-        }'
-        
-        echo "$default_config" > "$WIFI_CONFIG_FILE"
-        chmod 600 "$WIFI_CONFIG_FILE"
-        echo "Created default WiFi configuration"
-        
-        # Also create a simple config for manual editing
-        local manual_config="$BASE_DIR/config/wifi-config.json"
-        echo '{
-            "ssid": "'$DEFAULT_WIFI_SSID'",
-            "password": "'$DEFAULT_WIFI_PASSWORD'",
-            "note": "Edit this file to change WiFi settings"
-        }' > "$manual_config"
-        chmod 644 "$manual_config"
-        
-        echo "WiFi configuration files created. Edit $manual_config to change settings."
-    else
-        echo "Local WiFi configuration already exists"
-        # Check if it's the old format and convert
-        if grep -q '"ssid":' "$WIFI_CONFIG_FILE" && grep -q '"password":' "$WIFI_CONFIG_FILE"; then
-            echo "Converting old WiFi config format to new format..."
-            
-            local old_ssid=$(grep -o '"ssid": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
-            local old_password=$(grep -o '"password": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
-            
-            local new_config='{
-                "ssid": "'$old_ssid'",
-                "password_encrypted": "",
-                "source": "manual_legacy",
-                "priority": 2,
-                "last_updated": "'$(date -Iseconds)'",
-                "is_default": false,
-                "note": "Converted from old format"
-            }'
-            
-            echo "$new_config" > "$WIFI_CONFIG_FILE"
-            chmod 600 "$WIFI_CONFIG_FILE"
-            echo "Converted old WiFi config to new format"
-        fi
-    fi
-}
-
-# Function to get WiFi credentials from local config
-get_wifi_from_local_config() {
+# Function to get WiFi credentials from config
+get_wifi_from_config() {
     if [[ -f "$WIFI_CONFIG_FILE" ]]; then
-        # Try to get SSID
         local ssid=$(grep -o '"ssid": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
+        local password=$(grep -o '"password": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
         
-        # For new encrypted format, we can't decrypt in bash
-        # So we'll check for manual config file
-        local manual_config="$BASE_DIR/config/wifi-config.json"
-        if [[ -f "$manual_config" ]]; then
-            local manual_ssid=$(grep -o '"ssid": *"[^"]*"' "$manual_config" | cut -d'"' -f4)
-            local manual_password=$(grep -o '"password": *"[^"]*"' "$manual_config" | cut -d'"' -f4)
-            
-            if [[ -n "$manual_ssid" && -n "$manual_password" ]]; then
-                echo "$manual_ssid|$manual_password"
-                return 0
-            fi
-        fi
-        
-        # Fallback to default if we have SSID but no password
-        if [[ -n "$ssid" ]]; then
-            echo "$ssid|$DEFAULT_WIFI_PASSWORD"
+        if [[ -n "$ssid" && -n "$password" ]]; then
+            echo "$ssid|$password"
             return 0
         fi
     fi
     
-    # Ultimate fallback
+    # Fallback to defaults
     echo "$DEFAULT_WIFI_SSID|$DEFAULT_WIFI_PASSWORD"
     return 1
 }
@@ -267,111 +210,52 @@ connect_to_wifi() {
     local current_ssid=$(nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2 2>/dev/null || echo "")
     if [[ "$current_ssid" == "$ssid" ]]; then
         echo "Already connected to $ssid"
-        
-        # Test internet connectivity
-        if check_internet; then
-            echo "Internet connection verified"
-            return 0
-        else
-            echo "Connected to $ssid but no internet access, will reconnect..."
-        fi
+        return 0
     fi
     
-    # First, try to delete existing connection to avoid conflicts
-    echo "Cleaning up existing connection for $ssid..."
+    # Try to delete existing connection first (avoid conflicts)
     nmcli connection delete "$ssid" 2>/dev/null || true
     sleep 2
     
     # Try to connect
     echo "Connecting to $ssid..."
-    local connect_output
-    connect_output=$(nmcli device wifi connect "$ssid" password "$password" 2>&1)
-    local connect_result=$?
-    
-    if [ $connect_result -eq 0 ]; then
+    if nmcli device wifi connect "$ssid" password "$password" 2>&1; then
         echo "Successfully connected to $ssid"
         
         # Wait for connection to stabilize
         sleep 5
         
-        # Verify connection
-        if nmcli -t -f general.state con show "$ssid" 2>/dev/null | grep -q activated; then
-            echo "WiFi connection verified: $ssid"
-            
-            # Test internet
-            if check_internet; then
-                echo "Internet connection established"
-                return 0
-            else
-                echo "Connected to WiFi but no internet access"
-                return 1
-            fi
-        else
-            echo "Warning: Connection to $ssid may not be active"
-            return 1
-        fi
+        return 0
     else
-        echo "Failed to connect to $ssid: $connect_output"
+        echo "Failed to connect to $ssid, trying alternative method..."
         
-        # If connection fails, try scanning first
-        echo "Scanning for available networks..."
-        nmcli device wifi rescan
-        sleep 3
-        
-        # Try one more time
-        echo "Retrying connection..."
-        connect_output=$(nmcli device wifi connect "$ssid" password "$password" 2>&1)
+        # Alternative: Create connection profile first
+        nmcli connection add type wifi con-name "$ssid" ifname wlan0 ssid "$ssid" 2>/dev/null
+        nmcli connection modify "$ssid" wifi-sec.key-mgmt wpa-psk 2>/dev/null
+        nmcli connection modify "$ssid" wifi-sec.psk "$password" 2>/dev/null
+        nmcli connection up "$ssid" 2>/dev/null
         
         if [ $? -eq 0 ]; then
-            echo "Successfully connected on retry: $ssid"
-            sleep 5
-            check_internet
-            return 0
-        else
-            echo "Failed again to connect to $ssid"
-            return 1
-        fi
-    fi
-}
-
-# Function to check internet connectivity
-check_internet() {
-    echo "Checking internet connectivity..."
-    
-    # Try multiple endpoints
-    local endpoints=("8.8.8.8" "1.1.1.1" "google.com")
-    
-    for endpoint in "${endpoints[@]}"; do
-        if ping -c 1 -W 3 "$endpoint" > /dev/null 2>&1; then
-            echo "Internet connectivity confirmed via $endpoint"
+            echo "Connected via alternative method: $ssid"
             return 0
         fi
-    done
-    
-    # Try curl as fallback
-    if curl -s --connect-timeout 5 https://www.google.com > /dev/null 2>&1; then
-        echo "Internet connectivity confirmed via HTTPS"
-        return 0
+        
+        echo "Failed to connect to $ssid"
+        return 1
     fi
-    
-    echo "No internet connectivity"
-    return 1
 }
 
 # Function to Connect to configured WiFi with retry logic
 connect_to_configured_wifi() {
     echo "Setting up WiFi connection..."
     
-    # Create or update local WiFi config
-    create_or_update_local_wifi
-    
-    # Get WiFi configuration
-    local wifi_config=$(get_wifi_from_local_config)
-    if [[ -z "$wifi_config" ]]; then
-        echo "No WiFi configuration found, using defaults"
-        wifi_config="$DEFAULT_WIFI_SSID|$DEFAULT_WIFI_PASSWORD"
+    # Create default config if it doesn't exist
+    if [[ ! -f "$WIFI_CONFIG_FILE" ]]; then
+        create_default_wifi_config
     fi
     
+    # Get WiFi configuration
+    local wifi_config=$(get_wifi_from_config)
     local ssid=$(echo "$wifi_config" | cut -d'|' -f1)
     local password=$(echo "$wifi_config" | cut -d'|' -f2)
     
@@ -381,18 +265,6 @@ connect_to_configured_wifi() {
     fi
     
     echo "Using WiFi configuration: SSID=$ssid"
-    
-    # Check if we already have internet
-    if check_internet; then
-        echo "Internet already available, no need to reconnect"
-        return 0
-    fi
-    
-    # Scan for available networks first
-    echo "Scanning for available WiFi networks..."
-    if ! scan_wifi_networks; then
-        echo "Could not scan WiFi networks, attempting connection anyway..."
-    fi
     
     # Attempt to connect with retry logic
     local max_attempts=3
@@ -414,156 +286,33 @@ connect_to_configured_wifi() {
     done
     
     echo "Failed to connect to WiFi after $max_attempts attempts"
-    
-    # Try default WiFi as last resort
-    if [[ "$ssid" != "$DEFAULT_WIFI_SSID" ]]; then
-        echo "Trying default WiFi as fallback..."
-        if connect_to_wifi "$DEFAULT_WIFI_SSID" "$DEFAULT_WIFI_PASSWORD"; then
-            echo "Connected to default WiFi"
-            return 0
-        fi
-    fi
-    
     return 1
 }
 
-# Function to check if Node.js app is already running
-is_node_app_running() {
-    if curl -s http://localhost:3006/health > /dev/null 2>&1; then
-        return 0
-    fi
-    
-    # Alternative check using process
-    if pgrep -f "node.*server.js" > /dev/null; then
-        return 0
-    fi
-    
-    return 1
-}
-
-# Function to kill existing Node.js processes on port 3006
-kill_existing_node_processes() {
-    echo "Checking for existing Node.js processes on port 3006..."
-    
-    # Find PIDs using port 3006
-    local port_pids=$(lsof -ti:3006 2>/dev/null)
-    if [[ -n "$port_pids" ]]; then
-        echo "Killing processes using port 3006: $port_pids"
-        kill -9 $port_pids 2>/dev/null || true
-        sleep 2
-    fi
-    
-    # Kill any node processes for our app
-    local node_pids=$(pgrep -f "node.*server.js" 2>/dev/null)
-    if [[ -n "$node_pids" ]]; then
-        echo "Killing existing Node.js processes: $node_pids"
-        kill -9 $node_pids 2>/dev/null || true
-        sleep 2
-    fi
-    
-    # Double check
-    if pgrep -f "node.*server.js" > /dev/null; then
-        echo "Force killing any remaining Node.js processes..."
-        pkill -9 -f "node.*server.js" 2>/dev/null || true
-        sleep 2
-    fi
-}
-
-# Start a Background WiFi Monitor
+# Function to start a Background WiFi Monitor
 monitor_wifi() {
     echo "Starting WiFi monitor..."
     
-    # Function for WiFi monitoring
-    wifi_monitor_loop() {
-        local consecutive_failures=0
-        local max_consecutive_failures=3
-        
-        while true; do
-            # Check internet connectivity
-            if check_internet; then
-                consecutive_failures=0
-                echo "WiFi Monitor: Internet OK"
-            else
-                ((consecutive_failures++))
-                echo "WiFi Monitor: Internet lost (failure $consecutive_failures/$max_consecutive_failures)"
-                
-                if [[ $consecutive_failures -ge $max_consecutive_failures ]]; then
-                    echo "WiFi Monitor: Attempting to reconnect..."
-                    connect_to_configured_wifi
-                    consecutive_failures=0
-                fi
-            fi
-            
-            sleep 60  # Check every minute
-        done
-    }
-    
-    # Start monitor in background
-    wifi_monitor_loop &
+    while true; do
+        # Check if we have internet connectivity
+        if ! ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
+            echo "Internet connection lost. Attempting to reconnect..."
+            connect_to_configured_wifi
+        fi
+        sleep 60  # Check every minute
+    done &
 }
 
-# Improved ngrok handling with free trial support
-start_ngrok() {
-    echo "Checking ngrok..."
+# Function to kill existing Node.js processes
+kill_existing_node_processes() {
+    echo "Checking for existing Node.js processes..."
     
-    # Check if ngrok is installed
-    if ! command -v ngrok &> /dev/null; then
-        echo "Warning: ngrok is not installed. Skipping ngrok tunnel."
-        echo "To enable ngrok, install it with: ngrok config add-authtoken <YOUR_TOKEN>"
-        return 0
-    fi
+    # Kill by port
+    fuser -k 3006/tcp 2>/dev/null || true
     
-    # Check if authtoken is configured
-    if ! ngrok config check > /dev/null 2>&1; then
-        echo "Warning: ngrok authtoken not configured. Skipping ngrok tunnel."
-        echo "Configure with: ngrok config add-authtoken <YOUR_TOKEN>"
-        return 0
-    fi
-    
-    echo "Starting ngrok tunnel for port 3006..."
-    
-    # Kill any existing ngrok processes
-    pkill -f ngrok || true
+    # Kill by process name
+    pkill -f "node.*server.js" 2>/dev/null || true
     sleep 2
-    
-    # Create ngrok config directory if it doesn't exist
-    mkdir -p "$BASE_DIR/logs"
-    
-    # Start ngrok in background with specific configuration
-    ngrok http 3006 --log=stdout > "$BASE_DIR/logs/ngrok.log" 2>&1 &
-    local ngrok_pid=$!
-    
-    echo "ngrok started with PID: $ngrok_pid"
-    
-    # Wait a bit for ngrok to start
-    sleep 5
-    
-    # Try to get public URL
-    local max_attempts=10
-    local attempt=1
-    
-    while [[ $attempt -le $max_attempts ]]; do
-        if curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -q "public_url"; then
-            echo "ngrok tunnel established"
-            return 0
-        fi
-        
-        # Check if process is still running
-        if ! kill -0 $ngrok_pid 2>/dev/null; then
-            echo "ngrok process died, checking logs..."
-            if [[ -f "$BASE_DIR/logs/ngrok.log" ]]; then
-                tail -20 "$BASE_DIR/logs/ngrok.log"
-            fi
-            return 1
-        fi
-        
-        echo "Waiting for ngrok tunnel... (attempt $attempt/$max_attempts)"
-        sleep 5
-        ((attempt++))
-    done
-    
-    echo "ngrok tunnel not established after $max_attempts attempts, but process is running"
-    return 0
 }
 
 # Start Node.js App with better error handling
@@ -586,12 +335,6 @@ start_node_app() {
         return 1
     fi
     
-    # Install dependencies if node_modules doesn't exist
-    if [[ ! -d "node_modules" ]]; then
-        echo "Installing Node.js dependencies..."
-        npm install
-    fi
-    
     # Wait a moment to ensure port is free
     sleep 2
     
@@ -607,11 +350,6 @@ start_node_app() {
     while [[ $attempt -le $max_attempts ]]; do
         if curl -s http://localhost:3006/health > /dev/null 2>&1; then
             echo "Node.js app started successfully! (PID: $node_pid)"
-            
-            # Get and log health status
-            local health_status=$(curl -s http://localhost:3006/health | head -c 500)
-            echo "Health status: $health_status"
-            
             return 0
         fi
         
@@ -631,12 +369,6 @@ start_node_app() {
                 continue
             fi
             
-            # Try to get error output
-            if [[ -f "$BASE_DIR/logs/node_app.log" ]]; then
-                echo "Last log entries:"
-                tail -20 "$BASE_DIR/logs/node_app.log"
-            fi
-            
             return 1
         fi
         
@@ -646,20 +378,50 @@ start_node_app() {
     done
     
     echo "Warning: Node.js app not responding after 60 seconds, but process is still running"
-    echo "Check logs at: $BASE_DIR/logs/node_app.log"
     return 0
 }
 
-# Function to update the playlist - IMPROVED with better detection
+# Function to reload MPV playlist
+reload_mpv_playlist() {
+    echo "Reloading MPV playlist..."
+    
+    # Check if MPV is running and socket exists
+    if [[ -S "$MPV_SOCKET" ]]; then
+        # Check if socat is available
+        if command -v socat &> /dev/null; then
+            # Send command to MPV to reload playlist
+            echo '{ "command": ["loadlist", "'"$PLAYLIST"'", "replace"] }' | socat - "$MPV_SOCKET" 2>/dev/null
+            
+            if [[ $? -eq 0 ]]; then
+                echo "MPV playlist reloaded successfully"
+                return 0
+            else
+                echo "Failed to communicate with MPV socket"
+            fi
+        fi
+    else
+        echo "MPV socket not found: $MPV_SOCKET"
+    fi
+    
+    return 1
+}
+
+# Function to update the playlist with MPV reload
 update_playlist() {
     echo "Updating playlist..."
+    
+    # Store old playlist hash for comparison
+    local old_hash=""
+    if [[ -f "$PLAYLIST" ]]; then
+        old_hash=$(md5sum "$PLAYLIST" 2>/dev/null | cut -d' ' -f1)
+    fi
     
     # Create playlist file if it doesn't exist
     touch "$PLAYLIST"
     
     if [[ -d "$VIDEO_DIR" ]]; then
         # Find all video files and create playlist
-        find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" \) > "$PLAYLIST.tmp"
+        find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" -o -name "*.MP4" -o -name "*.AVI" -o -name "*.MKV" -o -name "*.MOV" \) > "$PLAYLIST.tmp"
         
         # Remove empty lines and sort
         grep -v '^$' "$PLAYLIST.tmp" | sort > "$PLAYLIST"
@@ -671,9 +433,9 @@ update_playlist() {
         # List videos for debugging
         if [[ $video_count -gt 0 ]]; then
             echo "Videos in playlist:"
-            head -10 "$PLAYLIST"  # Show first 10 only
-            if [[ $video_count -gt 10 ]]; then
-                echo "... and $((video_count - 10)) more"
+            head -5 "$PLAYLIST"  # Show first 5 only
+            if [[ $video_count -gt 5 ]]; then
+                echo "... and $((video_count - 5)) more"
             fi
         else
             echo "Warning: No video files found in $VIDEO_DIR"
@@ -691,16 +453,32 @@ update_playlist() {
     
     # Force playlist file permissions
     chmod 644 "$PLAYLIST"
-    echo "Playlist file created/updated: $PLAYLIST"
+    
+    # Check if playlist actually changed
+    local new_hash=$(md5sum "$PLAYLIST" 2>/dev/null | cut -d' ' -f1)
+    
+    if [[ "$old_hash" != "$new_hash" ]]; then
+        echo "Playlist changed - reloading MPV..."
+        if ! reload_mpv_playlist; then
+            # If reload fails, restart MPV
+            echo "Restarting MPV to load new playlist..."
+            pkill -f mpv 2>/dev/null || true
+            sleep 2
+            start_mpv
+        fi
+    else
+        echo "Playlist unchanged"
+    fi
 }
 
-# Optimized MPV startup with fallback options
+# Optimized MPV startup with better configuration
 start_mpv() {
     echo "Starting MPV playback..."
     
     # Check if MPV is installed
     if ! command -v mpv &> /dev/null; then
         echo "Error: MPV is not installed. Video playback disabled."
+        echo "Install MPV with: sudo apt-get install mpv"
         return 1
     fi
     
@@ -714,11 +492,12 @@ start_mpv() {
     fi
     
     # Additional wait for X server stability
-    sleep 2
+    echo "Waiting for X server to stabilize..."
+    sleep 3
     
     # Kill any existing MPV processes
-    pkill -f mpv || true
-    sleep 1
+    pkill -f mpv 2>/dev/null || true
+    sleep 2
     
     # Ensure playlist exists and is updated
     update_playlist
@@ -732,35 +511,84 @@ start_mpv() {
     
     echo "Starting MPV with optimized configuration..."
     
-    # Start MPV
-    mpv --fs \
+    # Create MPV log directory
+    mkdir -p "$BASE_DIR/logs"
+    
+    # Start MPV with better configuration for Raspberry Pi
+    # Using simpler configuration for better compatibility
+    mpv \
+        --fs \
+        --no-border \
+        --ontop \
         --shuffle \
         --loop-playlist=inf \
         --osd-level=0 \
+        --no-osc \
         --no-terminal \
         --input-ipc-server="$MPV_SOCKET" \
         --playlist="$PLAYLIST" \
         --keep-open=yes \
         --no-resume-playback \
         --hwdec=auto \
-        --vo=xv \
-        --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
+        --vo=gpu \
+        --profile=high-quality \
+        --cache=yes \
+        --cache-secs=30 \
+        --demuxer-max-bytes=500M \
+        --demuxer-readahead-secs=20 \
+        --quiet \
+        --volume=80 \
+        --no-audio-display \
+        --really-quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
     
     local mpv_pid=$!
     
     echo "MPV started with IPC socket: $MPV_SOCKET (PID: $mpv_pid)"
-    echo "MPV playback started successfully"
-    return 0
+    
+    # Wait a bit to see if MPV starts successfully
+    sleep 5
+    
+    # Check if MPV is running
+    if kill -0 $mpv_pid 2>/dev/null; then
+        echo "✓ MPV playback started successfully"
+        
+        # Send initial commands to MPV
+        if [[ -S "$MPV_SOCKET" ]]; then
+            # Set volume
+            echo '{ "command": ["set_property", "volume", 80] }' | socat - "$MPV_SOCKET" 2>/dev/null || true
+            # Enable shuffle
+            echo '{ "command": ["set_property", "shuffle", true] }' | socat - "$MPV_SOCKET" 2>/dev/null || true
+        fi
+        
+        return 0
+    else
+        echo "✗ MPV failed to start. Check logs: $BASE_DIR/logs/mpv.log"
+        
+        # Try alternative simpler configuration
+        echo "Trying alternative MPV configuration..."
+        pkill -f mpv 2>/dev/null || true
+        sleep 2
+        
+        # Try simpler configuration
+        mpv --fs --playlist="$PLAYLIST" --loop-playlist=inf --no-osc --no-osd-bar --volume=80 > "$BASE_DIR/logs/mpv_alt.log" 2>&1 &
+        
+        if kill -0 $! 2>/dev/null; then
+            echo "✓ MPV started with alternative configuration"
+            return 0
+        fi
+        
+        return 1
+    fi
 }
 
-# IMPROVED Directory monitoring with better file detection
+# IMPROVED Directory monitoring
 monitor_directory() {
     echo "Monitoring $VIDEO_DIR for changes..."
     
     # Check if inotifywait is available
     if ! command -v inotifywait &> /dev/null; then
         echo "Warning: inotifywait not available. Directory monitoring disabled."
-        echo "Install inotify-tools for automatic directory monitoring."
+        echo "Install inotify-tools: sudo apt-get install inotify-tools"
         
         # Fallback: periodic polling
         echo "Using periodic polling as fallback (every 30 seconds)..."
@@ -771,20 +599,45 @@ monitor_directory() {
         return 0
     fi
     
-    # Create a more robust monitoring loop
-    while true; do
-        inotifywait -r -e create -e modify -e moved_to -e close_write --format '%w%f' "$VIDEO_DIR" 2>/dev/null | while read -r file; do
-            echo "File change detected: $file"
+    # Monitor directory
+    {
+        while true; do
+            echo "Starting directory monitor..."
             
-            # Check if it's a video file
-            if [[ "$file" =~ \.(mp4|avi|mkv|mov)$ ]]; then
-                echo "Video file detected: $file"
-                sleep 2
-                update_playlist
-            fi
+            # Monitor for file changes
+            inotifywait -m -q -r \
+                -e close_write \
+                -e moved_to \
+                -e delete \
+                --format '%e %w%f' \
+                "$VIDEO_DIR" 2>/dev/null | while read -r event file; do
+                
+                echo "[$(date '+%H:%M:%S')] Event: $event | File: $(basename "$file")"
+                
+                # Skip temporary files and playlist.txt
+                if [[ "$file" =~ \.(tmp|part|download|crdownload)$ ]] || [[ "$file" == *"playlist.txt" ]]; then
+                    continue
+                fi
+                
+                # Check if it's a video file
+                if [[ "$file" =~ \.(mp4|avi|mkv|mov|MP4|AVI|MKV|MOV)$ ]]; then
+                    echo "✓ Video file detected: $(basename "$file")"
+                    
+                    # Wait a moment for file to be fully written
+                    sleep 2
+                    
+                    # Update playlist
+                    update_playlist
+                fi
+            done
+            
+            # If inotifywait exits, restart it
+            echo "inotifywait exited, restarting in 5 seconds..."
+            sleep 5
         done
-        sleep 10
-    done &
+    } &
+    
+    echo "✓ Directory monitoring started"
 }
 
 # Additional function: Periodic playlist refresh (safety net)
@@ -804,25 +657,14 @@ show_system_status() {
     echo "=========================================="
     
     # Internet status
-    if check_internet; then
+    if ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
         echo "Internet: ✅ CONNECTED"
     else
         echo "Internet: ❌ DISCONNECTED"
     fi
     
-    # WiFi status
-    if command -v nmcli &> /dev/null; then
-        local wifi_status=$(nmcli -t -f general.state con show --active 2>/dev/null | head -1)
-        local wifi_ssid=$(nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2 2>/dev/null)
-        if [[ -n "$wifi_status" ]]; then
-            echo "WiFi: ✅ CONNECTED to $wifi_ssid"
-        else
-            echo "WiFi: ❌ DISCONNECTED"
-        fi
-    fi
-    
     # Node.js app status
-    if is_node_app_running; then
+    if curl -s http://localhost:3006/health > /dev/null 2>&1; then
         echo "Node.js App: ✅ RUNNING"
     else
         echo "Node.js App: ❌ STOPPED"
@@ -833,6 +675,13 @@ show_system_status() {
         echo "Video Playback: ✅ RUNNING"
     else
         echo "Video Playback: ❌ STOPPED"
+    fi
+    
+    # X server status
+    if is_xserver_running; then
+        echo "X Server: ✅ RUNNING"
+    else
+        echo "X Server: ❌ STOPPED"
     fi
     
     # Video count
@@ -849,27 +698,27 @@ show_system_status() {
 main() {
     echo "Starting ADS Display System..."
     
-    # Wait for network to stabilize
-    echo "Waiting for network initialization..."
-    sleep 5
+    # Wait a moment
+    sleep 2
     
-    # Connect to configured WiFi (non-blocking)
-    connect_to_configured_wifi
-    
-    # Show initial status
-    show_system_status
+    # Connect to configured WiFi (in background)
+    connect_to_configured_wifi &
     
     # Start WiFi monitoring
     monitor_wifi
     
-    # Start ngrok tunnel (non-blocking)
-    start_ngrok &
-    
     # Start Node.js application
     if ! start_node_app; then
-        echo "Failed to start Node.js app, retrying in 10 seconds..."
+        echo "Failed to start Node.js app, will retry..."
         sleep 10
         start_node_app
+    fi
+    
+    # For Lite version, start X server FIRST
+    if is_lite_version; then
+        echo "Lite version detected - starting X server..."
+        start_xserver
+        sleep 5
     fi
     
     # Initial playlist creation
@@ -879,7 +728,9 @@ main() {
     # Start MPV playback (only if X server is available)
     if is_xserver_running; then
         if ! start_mpv; then
-            echo "Failed to start MPV, will retry later"
+            echo "Failed to start MPV, will retry in 10 seconds..."
+            sleep 10
+            start_mpv
         fi
     else
         echo "X server not available - video playback disabled"
@@ -900,7 +751,7 @@ main() {
     echo "Access Points:"
     echo "  - Local: http://localhost:3006"
     echo "  - Health: http://localhost:3006/health"
-    echo "  - WiFi Config: Edit $BASE_DIR/config/wifi-config.json"
+    echo "  - WiFi Config: Edit $WIFI_CONFIG_FILE"
     echo ""
     echo "Log Files:"
     echo "  - System: $LOG_FILE"
@@ -911,39 +762,22 @@ main() {
     echo "=========================================="
     
     # Keep script running and monitor processes
-    local check_interval=30
-    local status_counter=0
-    
     while true; do
-        # Periodic status display
-        ((status_counter++))
-        if [[ $status_counter -ge 10 ]]; then  # Every 5 minutes (30s * 10)
-            show_system_status
-            status_counter=0
-        fi
-        
         # Check if Node.js app is still running
         if ! pgrep -f "node.*server.js" > /dev/null; then
             echo "Warning: Node.js app stopped. Restarting..."
-            if ! start_node_app; then
-                echo "Failed to restart Node.js app, will retry later"
-            fi
+            start_node_app
         fi
         
         # Check if MPV is still running (only if X server is available)
         if is_xserver_running && ! pgrep -f mpv > /dev/null; then
             echo "Warning: MPV stopped. Restarting..."
-            if ! start_mpv; then
-                echo "Failed to restart MPV, will retry later"
-            fi
+            start_mpv
         fi
         
-        # Check internet periodically
-        if ! check_internet; then
-            echo "Internet check failed, WiFi monitor will handle reconnection"
-        fi
-        
-        sleep $check_interval
+        # Show status periodically (every 5 minutes)
+        sleep 300
+        show_system_status
     done
 }
 
@@ -952,9 +786,6 @@ handle_error() {
     echo "Error occurred in ADS Display startup script!"
     echo "Error details: $1"
     echo "Check the log file for more details: $LOG_FILE"
-    
-    # Show current status
-    show_system_status
     
     # Try to restart main function after a delay
     sleep 10
