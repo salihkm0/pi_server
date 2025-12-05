@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# ADS Display Startup Script
-# Dynamic WiFi configuration and video playback
+# ADS Display Startup Script - Clean Version
+# Video playback only - WiFi is managed by Node.js app
 # Compatible with both Raspberry Pi Desktop and Lite versions
 
 # Configuration - Dynamic paths based on Desktop availability
@@ -17,23 +17,19 @@ VIDEO_DIR="$BASE_DIR/ads-videos"
 PLAYLIST="$VIDEO_DIR/playlist.txt"
 MPV_SOCKET="/tmp/mpv-socket"
 LOG_FILE="$BASE_DIR/logs/ads_display.log"
-CONFIG_FILE="$BASE_DIR/config/device-config.json"
-WIFI_CONFIG_FILE="$BASE_DIR/config/wifi-config.json"
 
 # Get current username
 USERNAME=$(whoami)
 
 # Ensure directories exist
 mkdir -p "$(dirname "$LOG_FILE")"
-mkdir -p "$(dirname "$CONFIG_FILE")"
-mkdir -p "$(dirname "$WIFI_CONFIG_FILE")"
 mkdir -p "$VIDEO_DIR"
 
 # Redirect all output to log file
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=========================================="
-echo "ADS Display Startup Script"
+echo "ADS Display Startup Script (Clean)"
 echo "User: $USERNAME"
 echo "Base Directory: $BASE_DIR"
 echo "Started at: $(date)"
@@ -44,10 +40,6 @@ export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 
 # Set DISPLAY for GUI applications like MPV
 export DISPLAY=:0
-
-# Default WiFi credentials (fallback)
-DEFAULT_WIFI_SSID="spotus"
-DEFAULT_WIFI_PASSWORD="spotus@123"
 
 # Function to check if we're on Raspberry Pi Lite
 is_lite_version() {
@@ -74,7 +66,7 @@ is_xserver_running() {
     fi
 }
 
-# Function to start X server for Lite version with better error handling
+# Function to start X server for Lite version
 start_xserver() {
     if is_lite_version; then
         echo "Lite version detected - checking X server..."
@@ -91,8 +83,7 @@ start_xserver() {
         
         echo "Starting X server..."
         
-        # Start X server with proper configuration for headless mode
-        # Use different method for better compatibility
+        # Start X server
         if [ -f /usr/bin/startx ]; then
             startx -- -nocursor -retro > /dev/null 2>&1 &
         else
@@ -103,8 +94,8 @@ start_xserver() {
         
         echo "X server started with PID: $xserver_pid"
         
-        # Wait for X server to be ready with better detection
-        local max_attempts=30  # Increased attempts
+        # Wait for X server to be ready
+        local max_attempts=30
         local attempt=1
         
         while [[ $attempt -le $max_attempts ]]; do
@@ -115,192 +106,20 @@ start_xserver() {
                 xset s off 2>/dev/null || true
                 xset -dpms 2>/dev/null || true
                 xset s noblank 2>/dev/null || true
-                
-                # Additional X configuration for better performance
                 xsetroot -solid black 2>/dev/null || true
                 
                 return 0
             fi
             
-            # Check if process is still running
-            if ! kill -0 $xserver_pid 2>/dev/null; then
-                echo "Warning: X server process died, attempting alternative startup..."
-                
-                # Try alternative method
-                if [ -f /usr/bin/X ]; then
-                    /usr/bin/X :0 -ac -nocursor -retro > /dev/null 2>&1 &
-                    local new_pid=$!
-                    echo "Alternative X server started with PID: $new_pid"
-                    xserver_pid=$new_pid
-                fi
-            fi
-            
             echo "Waiting for X server... (attempt $attempt/$max_attempts)"
-            sleep 3  # Increased wait time
+            sleep 3
             ((attempt++))
         done
         
         echo "Warning: X server not ready after $max_attempts attempts"
-        echo "Trying one more time with different parameters..."
-        
-        # Last attempt with different parameters
-        startx -- -nocursor -retro -depth 24 > /dev/null 2>&1 &
-        sleep 5
-        
-        if is_xserver_running; then
-            echo "X server finally started!"
-            return 0
-        fi
-        
-        echo "Error: X server not available. Cannot start MPV."
         return 1
     fi
     return 0
-}
-
-# Function to create default WiFi configuration
-create_default_wifi_config() {
-    echo "Creating default WiFi configuration..."
-    
-    local default_config='{
-        "ssid": "'$DEFAULT_WIFI_SSID'",
-        "password": "'$DEFAULT_WIFI_PASSWORD'",
-        "is_default": true,
-        "auto_connect": true,
-        "created_at": "'$(date -Iseconds)'",
-        "updated_at": "'$(date -Iseconds)'"
-    }'
-    
-    echo "$default_config" > "$WIFI_CONFIG_FILE"
-    chmod 600 "$WIFI_CONFIG_FILE"
-    echo "Default WiFi configuration created."
-}
-
-# Function to get WiFi credentials from config
-get_wifi_from_config() {
-    if [[ -f "$WIFI_CONFIG_FILE" ]]; then
-        local ssid=$(grep -o '"ssid": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
-        local password=$(grep -o '"password": *"[^"]*"' "$WIFI_CONFIG_FILE" | cut -d'"' -f4)
-        
-        if [[ -n "$ssid" && -n "$password" ]]; then
-            echo "$ssid|$password"
-            return 0
-        fi
-    fi
-    
-    # Fallback to defaults
-    echo "$DEFAULT_WIFI_SSID|$DEFAULT_WIFI_PASSWORD"
-    return 1
-}
-
-# Function to connect to WiFi using nmcli
-connect_to_wifi() {
-    local ssid="$1"
-    local password="$2"
-    
-    echo "Attempting to connect to WiFi: $ssid"
-    
-    # Check if NetworkManager is available
-    if ! command -v nmcli &> /dev/null; then
-        echo "Error: NetworkManager (nmcli) not available"
-        return 1
-    fi
-    
-    # Check if already connected to this SSID
-    local current_ssid=$(nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2 2>/dev/null || echo "")
-    if [[ "$current_ssid" == "$ssid" ]]; then
-        echo "Already connected to $ssid"
-        return 0
-    fi
-    
-    # Try to delete existing connection first (avoid conflicts)
-    nmcli connection delete "$ssid" 2>/dev/null || true
-    sleep 2
-    
-    # Try to connect
-    echo "Connecting to $ssid..."
-    if nmcli device wifi connect "$ssid" password "$password" 2>&1; then
-        echo "Successfully connected to $ssid"
-        
-        # Wait for connection to stabilize
-        sleep 5
-        
-        return 0
-    else
-        echo "Failed to connect to $ssid, trying alternative method..."
-        
-        # Alternative: Create connection profile first
-        nmcli connection add type wifi con-name "$ssid" ifname wlan0 ssid "$ssid" 2>/dev/null
-        nmcli connection modify "$ssid" wifi-sec.key-mgmt wpa-psk 2>/dev/null
-        nmcli connection modify "$ssid" wifi-sec.psk "$password" 2>/dev/null
-        nmcli connection up "$ssid" 2>/dev/null
-        
-        if [ $? -eq 0 ]; then
-            echo "Connected via alternative method: $ssid"
-            return 0
-        fi
-        
-        echo "Failed to connect to $ssid"
-        return 1
-    fi
-}
-
-# Function to Connect to configured WiFi with retry logic
-connect_to_configured_wifi() {
-    echo "Setting up WiFi connection..."
-    
-    # Create default config if it doesn't exist
-    if [[ ! -f "$WIFI_CONFIG_FILE" ]]; then
-        create_default_wifi_config
-    fi
-    
-    # Get WiFi configuration
-    local wifi_config=$(get_wifi_from_config)
-    local ssid=$(echo "$wifi_config" | cut -d'|' -f1)
-    local password=$(echo "$wifi_config" | cut -d'|' -f2)
-    
-    if [[ -z "$ssid" || -z "$password" ]]; then
-        echo "Error: Invalid WiFi configuration"
-        return 1
-    fi
-    
-    echo "Using WiFi configuration: SSID=$ssid"
-    
-    # Attempt to connect with retry logic
-    local max_attempts=3
-    local attempt=1
-    
-    while [[ $attempt -le $max_attempts ]]; do
-        echo "WiFi connection attempt $attempt of $max_attempts..."
-        
-        if connect_to_wifi "$ssid" "$password"; then
-            echo "WiFi connection successful"
-            return 0
-        fi
-        
-        ((attempt++))
-        if [[ $attempt -le $max_attempts ]]; then
-            echo "Retrying in 10 seconds..."
-            sleep 10
-        fi
-    done
-    
-    echo "Failed to connect to WiFi after $max_attempts attempts"
-    return 1
-}
-
-# Function to start a Background WiFi Monitor
-monitor_wifi() {
-    echo "Starting WiFi monitor..."
-    
-    while true; do
-        # Check if we have internet connectivity
-        if ! ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
-            echo "Internet connection lost. Attempting to reconnect..."
-            connect_to_configured_wifi
-        fi
-        sleep 60  # Check every minute
-    done &
 }
 
 # Function to kill existing Node.js processes
@@ -315,9 +134,9 @@ kill_existing_node_processes() {
     sleep 2
 }
 
-# Start Node.js App with better error handling
+# Start Node.js App
 start_node_app() {
-    echo "Starting Node.js app..."
+    echo "Starting Node.js app (WiFi is managed by Node.js)..."
     cd "$BASE_DIR" || { echo "Failed to navigate to Node.js app directory"; return 1; }
     
     # Kill any existing node processes first
@@ -349,7 +168,8 @@ start_node_app() {
     
     while [[ $attempt -le $max_attempts ]]; do
         if curl -s http://localhost:3006/health > /dev/null 2>&1; then
-            echo "Node.js app started successfully! (PID: $node_pid)"
+            echo "✅ Node.js app started successfully! (PID: $node_pid)"
+            echo "Note: WiFi is now managed by the Node.js application"
             return 0
         fi
         
@@ -471,7 +291,7 @@ update_playlist() {
     fi
 }
 
-# Optimized MPV startup with better configuration
+# Start MPV for video playback
 start_mpv() {
     echo "Starting MPV playback..."
     
@@ -514,8 +334,7 @@ start_mpv() {
     # Create MPV log directory
     mkdir -p "$BASE_DIR/logs"
     
-    # Start MPV with better configuration for Raspberry Pi
-    # Using simpler configuration for better compatibility
+    # Start MPV with Raspberry Pi optimized configuration
     mpv \
         --fs \
         --no-border \
@@ -531,11 +350,8 @@ start_mpv() {
         --no-resume-playback \
         --hwdec=auto \
         --vo=gpu \
-        --profile=high-quality \
         --cache=yes \
         --cache-secs=30 \
-        --demuxer-max-bytes=500M \
-        --demuxer-readahead-secs=20 \
         --quiet \
         --volume=80 \
         --no-audio-display \
@@ -550,38 +366,15 @@ start_mpv() {
     
     # Check if MPV is running
     if kill -0 $mpv_pid 2>/dev/null; then
-        echo "✓ MPV playback started successfully"
-        
-        # Send initial commands to MPV
-        if [[ -S "$MPV_SOCKET" ]]; then
-            # Set volume
-            echo '{ "command": ["set_property", "volume", 80] }' | socat - "$MPV_SOCKET" 2>/dev/null || true
-            # Enable shuffle
-            echo '{ "command": ["set_property", "shuffle", true] }' | socat - "$MPV_SOCKET" 2>/dev/null || true
-        fi
-        
+        echo "✅ MPV playback started successfully"
         return 0
     else
-        echo "✗ MPV failed to start. Check logs: $BASE_DIR/logs/mpv.log"
-        
-        # Try alternative simpler configuration
-        echo "Trying alternative MPV configuration..."
-        pkill -f mpv 2>/dev/null || true
-        sleep 2
-        
-        # Try simpler configuration
-        mpv --fs --playlist="$PLAYLIST" --loop-playlist=inf --no-osc --no-osd-bar --volume=80 > "$BASE_DIR/logs/mpv_alt.log" 2>&1 &
-        
-        if kill -0 $! 2>/dev/null; then
-            echo "✓ MPV started with alternative configuration"
-            return 0
-        fi
-        
+        echo "❌ MPV failed to start. Check logs: $BASE_DIR/logs/mpv.log"
         return 1
     fi
 }
 
-# IMPROVED Directory monitoring
+# Directory monitoring for video files
 monitor_directory() {
     echo "Monitoring $VIDEO_DIR for changes..."
     
@@ -621,7 +414,7 @@ monitor_directory() {
                 
                 # Check if it's a video file
                 if [[ "$file" =~ \.(mp4|avi|mkv|mov|MP4|AVI|MKV|MOV)$ ]]; then
-                    echo "✓ Video file detected: $(basename "$file")"
+                    echo "✅ Video file detected: $(basename "$file")"
                     
                     # Wait a moment for file to be fully written
                     sleep 2
@@ -637,10 +430,10 @@ monitor_directory() {
         done
     } &
     
-    echo "✓ Directory monitoring started"
+    echo "✅ Directory monitoring started"
 }
 
-# Additional function: Periodic playlist refresh (safety net)
+# Periodic playlist refresh (safety net)
 start_periodic_playlist_refresh() {
     echo "Starting periodic playlist refresh (every 2 minutes)..."
     while true; do
@@ -656,18 +449,13 @@ show_system_status() {
     echo "SYSTEM STATUS"
     echo "=========================================="
     
-    # Internet status
-    if ping -c 1 -W 3 8.8.8.8 > /dev/null 2>&1; then
-        echo "Internet: ✅ CONNECTED"
-    else
-        echo "Internet: ❌ DISCONNECTED"
-    fi
-    
     # Node.js app status
     if curl -s http://localhost:3006/health > /dev/null 2>&1; then
         echo "Node.js App: ✅ RUNNING"
+        echo "WiFi Management: ✅ HANDLED BY NODE.JS"
     else
         echo "Node.js App: ❌ STOPPED"
+        echo "WiFi Management: ❌ NOT AVAILABLE"
     fi
     
     # MPV status
@@ -697,24 +485,19 @@ show_system_status() {
 # Main startup sequence
 main() {
     echo "Starting ADS Display System..."
+    echo "Note: WiFi connection is managed by the Node.js application"
     
     # Wait a moment
     sleep 2
     
-    # Connect to configured WiFi (in background)
-    connect_to_configured_wifi &
-    
-    # Start WiFi monitoring
-    monitor_wifi
-    
-    # Start Node.js application
+    # Start Node.js application (handles WiFi)
     if ! start_node_app; then
         echo "Failed to start Node.js app, will retry..."
         sleep 10
         start_node_app
     fi
     
-    # For Lite version, start X server FIRST
+    # For Lite version, start X server
     if is_lite_version; then
         echo "Lite version detected - starting X server..."
         start_xserver
@@ -746,12 +529,12 @@ main() {
     # Show final status
     show_system_status
     
-    echo "ADS Display System Started Successfully"
+    echo "✅ ADS Display System Started Successfully"
     echo ""
     echo "Access Points:"
     echo "  - Local: http://localhost:3006"
     echo "  - Health: http://localhost:3006/health"
-    echo "  - WiFi Config: Edit $WIFI_CONFIG_FILE"
+    echo "  - WiFi: Managed by Node.js application"
     echo ""
     echo "Log Files:"
     echo "  - System: $LOG_FILE"
