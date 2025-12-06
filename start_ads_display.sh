@@ -1,10 +1,219 @@
 #!/bin/bash
 
+# ADS Display Dependencies Installation Script
+# Optimized for Raspberry Pi
+
+echo "=========================================="
+echo "ADS Display Dependencies Installation"
+echo "=========================================="
+
+# Get current user
+USERNAME=$(whoami)
+echo "[INFO] Installing dependencies for user: $USERNAME"
+
+# Detect if it's a desktop or lite version
+if [ -d "/home/$USER/Desktop" ]; then
+    BASE_DIR="/home/$USER/Desktop/pi_server"
+    echo "[INFO] Desktop version detected. Using base directory: $BASE_DIR"
+else
+    BASE_DIR="/home/$USER/pi_server"
+    echo "[INFO] Lite version detected. Using base directory: $BASE_DIR"
+fi
+
+# Create directories
+mkdir -p "$BASE_DIR"
+mkdir -p "$BASE_DIR/logs"
+mkdir -p "$BASE_DIR/ads-videos"
+mkdir -p "$BASE_DIR/config"
+
+# Update system first
+echo "[INFO] Updating package list..."
+sudo apt update -y
+
+# Install system dependencies
+echo "[INFO] Installing system dependencies..."
+sudo apt install -y \
+    curl \
+    wget \
+    git \
+    build-essential \
+    python3 \
+    python3-pip \
+    net-tools \
+    wireless-tools \
+    network-manager \
+    inotify-tools \
+    socat \
+    unclutter \
+    x11-utils \
+    xserver-xorg \
+    xinit \
+    xorg \
+    cron
+
+# Install X server and minimal desktop environment for Lite version
+echo "[INFO] Installing X server and minimal desktop environment for Lite version..."
+sudo apt install -y \
+    xserver-xorg \
+    xinit \
+    xorg \
+    openbox \
+    lightdm \
+    feh
+
+# Install Node.js
+echo "[INFO] Installing Node.js..."
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Verify Node.js installation
+NODE_VERSION=$(node -v)
+NPM_VERSION=$(npm -v)
+echo "[INFO] Node.js version: $NODE_VERSION"
+echo "[INFO] NPM version: $NPM_VERSION"
+
+# Install PM2 globally
+echo "[INFO] Installing PM2..."
+sudo npm install -g pm2
+
+# Install ngrok
+echo "[INFO] Installing ngrok..."
+curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+sudo apt update
+sudo apt install -y ngrok
+echo "[INFO] Ngrok installed. Remember to configure with: ngrok config add-authtoken <YOUR_AUTH_TOKEN>"
+
+# Install MPV media player with hardware acceleration
+echo "[INFO] Installing MPV media player with hardware acceleration..."
+sudo apt install -y mpv
+
+# Configure MPV for Raspberry Pi optimization
+echo "[INFO] Configuring MPV for Raspberry Pi optimization..."
+MPV_VERSION=$(mpv --version | head -n1)
+echo "[INFO] MPV version: $MPV_VERSION"
+
+# Create application directories
+echo "[INFO] Creating application directories..."
+mkdir -p "$BASE_DIR/config"
+mkdir -p "$BASE_DIR/logs"
+mkdir -p "$BASE_DIR/ads-videos"
+
+# Create default config files
+if [ ! -f "$BASE_DIR/config/device-config.json" ]; then
+    echo '{
+        "deviceId": "raspberry_pi_ads_display",
+        "version": "1.0.0",
+        "location": "unknown",
+        "platform": "linux",
+        "autoUpdate": {
+            "enabled": true,
+            "checkInterval": 30
+        },
+        "video": {
+            "autoPlay": true,
+            "shuffle": true,
+            "defaultVolume": 80
+        },
+        "sync": {
+            "enabled": true,
+            "interval": 10
+        }
+    }' > "$BASE_DIR/config/device-config.json"
+fi
+
+# Clean up existing node_modules to fix npm errors
+echo "[INFO] Cleaning up existing node_modules..."
+cd "$BASE_DIR"
+if [ -d "node_modules" ]; then
+    echo "[INFO] Removing existing node_modules..."
+    rm -rf node_modules package-lock.json
+fi
+
+# Create package.json if it doesn't exist
+if [ ! -f "package.json" ]; then
+    echo "[INFO] Creating package.json..."
+    echo '{
+        "name": "raspberrypi-ads-display",
+        "version": "1.0.0",
+        "description": "ADS Display System for Raspberry Pi",
+        "main": "server.js",
+        "scripts": {
+            "start": "node server.js",
+            "dev": "node --watch server.js"
+        },
+        "dependencies": {
+            "express": "^4.18.2",
+            "axios": "^1.6.2",
+            "mqtt": "^5.4.0",
+            "cors": "^2.8.5",
+            "dotenv": "^16.3.1",
+            "mongoose": "^8.0.3",
+            "bcryptjs": "^2.4.3",
+            "jsonwebtoken": "^9.0.2",
+            "multer": "^1.4.5-lts.1",
+            "socket.io": "^4.7.2",
+            "helmet": "^7.1.0",
+            "express-rate-limit": "^7.1.5",
+            "winston": "^3.11.0"
+        },
+        "devDependencies": {
+            "nodemon": "^3.0.2"
+        }
+    }' > package.json
+fi
+
+# Install Node.js project dependencies
+echo "[INFO] Installing Node.js project dependencies..."
+npm install --no-audit --no-fund
+
+# If npm install fails, try with force clean install
+if [ $? -ne 0 ]; then
+    echo "[WARN] Standard install failed, trying clean install..."
+    rm -rf node_modules package-lock.json
+    npm cache clean --force
+    npm install --no-audit --no-fund --force
+fi
+
+# Create startup script
+echo "[INFO] Creating startup scripts..."
+
+# Create systemd service
+echo "[INFO] Creating systemd service..."
+sudo tee /etc/systemd/system/ads-display.service > /dev/null << EOF
+[Unit]
+Description=ADS Display System
+After=network.target
+
+[Service]
+Type=simple
+User=$USERNAME
+WorkingDirectory=$BASE_DIR
+Environment="DISPLAY=:0"
+Environment="PATH=/usr/bin:/usr/local/bin"
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=ads-display
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Create bash startup script
+STARTUP_SCRIPT="$BASE_DIR/start_ads.sh"
+echo "[INFO] Creating startup script: $STARTUP_SCRIPT"
+
+cat > "$STARTUP_SCRIPT" << 'EOF'
+#!/bin/bash
+
 # ADS Display Startup Script - Optimized for Raspberry Pi
 # Video playback only - WiFi is managed by Node.js app
 
 # Configuration
-BASE_DIR="/home/$USER/pi_server"
+BASE_DIR="/home/$(whoami)/pi_server"
 VIDEO_DIR="$BASE_DIR/ads-videos"
 PLAYLIST="$VIDEO_DIR/playlist.txt"
 MPV_SOCKET="/tmp/mpv-socket"
@@ -524,3 +733,37 @@ trap 'cleanup' INT TERM EXIT
 
 # Run main function
 main
+EOF
+
+chmod +x "$STARTUP_SCRIPT"
+
+# Enable and start systemd service
+echo "[INFO] Enabling systemd service..."
+sudo systemctl daemon-reload
+sudo systemctl enable ads-display.service
+sudo systemctl start ads-display.service
+
+# Create crontab for automatic startup
+echo "[INFO] Setting up crontab..."
+(crontab -l 2>/dev/null | grep -v "$STARTUP_SCRIPT"; echo "@reboot $STARTUP_SCRIPT") | crontab -
+
+# Fix permissions
+echo "[INFO] Fixing permissions..."
+sudo chown -R $USERNAME:$USERNAME "$BASE_DIR"
+chmod -R 755 "$BASE_DIR"
+
+echo "=========================================="
+echo "✅ Installation completed successfully!"
+echo "=========================================="
+echo ""
+echo "Next steps:"
+echo "1. Configure ngrok: ngrok config add-authtoken <YOUR_TOKEN>"
+echo "2. Start the system: $STARTUP_SCRIPT"
+echo "3. Check status: sudo systemctl status ads-display"
+echo "4. View logs: tail -f $BASE_DIR/logs/node_app.log"
+echo ""
+echo "To start manually:"
+echo "  cd $BASE_DIR && node server.js"
+echo ""
+echo "The system will auto-start on reboot."
+echo "=========================================="
