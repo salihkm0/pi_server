@@ -241,35 +241,31 @@ fi
 # Setup crontab for automatic startup and monitoring
 print_status "Setting up crontab entries..."
 
-# Create a crontab setup script
-CRONTAB_SCRIPT="/tmp/setup_ads_cron.sh"
+# Step 1: Clear existing crontab completely
+print_status "Clearing existing crontab..."
+echo "" | crontab -
 
-cat > "$CRONTAB_SCRIPT" << EOF
-#!/bin/bash
+# Step 2: Add new crontab entries
+print_status "Adding new crontab entries..."
+cat << EOF | crontab -
+# ADS Display Crontab Configuration
+# Auto-start after reboot
+@reboot sleep 30 && export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_startup.log 2>&1
 
-# Remove existing ADS Display entries from crontab
-crontab -l | grep -v "ads-display\|start_ads_display.sh" | crontab -
+# Daily restart at 3 AM
+0 3 * * * pkill -f start_ads_display.sh && sleep 10 && export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_restart.log 2>&1
 
-# Add new crontab entries
-(
-    crontab -l 2>/dev/null | grep -v "ads-display\|start_ads_display.sh"
-    echo "@reboot sleep 30 && export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_startup.log 2>&1"
-    echo "0 3 * * * pkill -f start_ads_display.sh && sleep 10 && export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_restart.log 2>&1"
-    echo "*/5 * * * * pgrep -f start_ads_display.sh > /dev/null || (export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_recovery.log 2>&1)"
-    echo "*/10 * * * * curl -s http://localhost:3000/health > /dev/null || (pkill -f node && sleep 5 && cd $BASE_DIR && node server.js >> $BASE_DIR/logs/node_recovery.log 2>&1 &)"
-) | crontab -
+# Recovery if process dies (every 5 minutes)
+*/5 * * * * pgrep -f start_ads_display.sh > /dev/null || (export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_recovery.log 2>&1)
 
-echo "Crontab setup completed"
+# Node.js health check (every 10 minutes)
+*/10 * * * * curl -s http://localhost:3000/health > /dev/null || (pkill -f node && sleep 5 && cd $BASE_DIR && node server.js >> $BASE_DIR/logs/node_recovery.log 2>&1 &)
 EOF
-
-chmod +x "$CRONTAB_SCRIPT"
-
-# Execute the crontab setup script
-bash "$CRONTAB_SCRIPT"
 
 # Verify crontab setup
 print_status "Verifying crontab setup..."
-crontab -l | grep -E "(ads-display|start_ads_display)"
+echo "Current crontab entries:"
+crontab -l
 
 # Create a health check script for crontab
 HEALTH_SCRIPT="$BASE_DIR/health_check.sh"
@@ -339,11 +335,18 @@ EOF
 
 chmod +x "$HEALTH_SCRIPT"
 
-# Add health check to crontab (every 10 minutes)
+# Step 3: Add health check to crontab (every 10 minutes)
+print_status "Adding health check to crontab..."
 (
     crontab -l 2>/dev/null | grep -v "health_check.sh"
     echo "*/10 * * * * bash $HEALTH_SCRIPT"
 ) | crontab -
+
+# Final verification
+print_status "Final crontab verification..."
+echo "All crontab entries:"
+crontab -l
+echo ""
 
 # Make this installation script executable
 chmod +x "$0"
@@ -360,7 +363,7 @@ sudo systemctl start cron
 
 print_status "Installation completed successfully!"
 echo ""
-print_status "Crontab entries added:"
+print_status "Crontab has been cleared and reconfigured with:"
 echo "  - @reboot: Auto-start after 30 seconds"
 echo "  - Daily 3 AM: Restart application" 
 echo "  - Every 5 minutes: Recovery if process dies"
