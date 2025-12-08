@@ -1,16 +1,18 @@
 #!/bin/bash
 
-# ADS Display Startup Script - Clean Version
-# Video playback only - WiFi is managed by Node.js app
+# ADS Display Startup Script
+# Dynamic WiFi configuration and video playback
 # Compatible with both Raspberry Pi Desktop and Lite versions
 
 # Configuration - Dynamic paths based on Desktop availability
-if [ -d "/home/$USER/Desktop" ]; then
+USERNAME=$(whoami)
+
+if [ -d "/home/$USERNAME/Desktop" ]; then
     # Desktop version
-    BASE_DIR="/home/$USER/Desktop/pi_server"
+    BASE_DIR="/home/$USERNAME/Desktop/pi_server"
 else
     # Lite version
-    BASE_DIR="/home/$USER/pi_server"
+    BASE_DIR="/home/$USERNAME/pi_server"
 fi
 
 VIDEO_DIR="$BASE_DIR/ads-videos"
@@ -19,12 +21,9 @@ MPV_SOCKET="/tmp/mpv-socket"
 LOG_FILE="$BASE_DIR/logs/ads_display.log"
 CONFIG_FILE="$BASE_DIR/config/device-config.json"
 
-# Get current username
-USERNAME=$(whoami)
-
 # Ensure directories exist
-mkdir -p "$(dirname "$LOG_FILE")"
-mkdir -p "$(dirname "$CONFIG_FILE")"
+mkdir -p "$BASE_DIR/logs"
+mkdir -p "$BASE_DIR/config"
 mkdir -p "$VIDEO_DIR"
 
 # Redirect all output to log file
@@ -45,7 +44,7 @@ export DISPLAY=:0
 
 # Function to check if we're on Raspberry Pi Lite
 is_lite_version() {
-    if [ -d "/home/$USER/Desktop" ]; then
+    if [ -d "/home/$USERNAME/Desktop" ]; then
         return 1  # Desktop version
     else
         return 0  # Lite version
@@ -86,9 +85,15 @@ start_xserver() {
         echo "Starting X server..."
 
         # Start X server with proper configuration for headless mode
-        sudo X :0 -ac -nocursor -retro -config /etc/X11/xorg.conf.headless > /dev/null 2>&1 &
+        # Try different methods for compatibility
+        if [ -f "/etc/X11/xorg.conf.headless" ]; then
+            sudo X :0 -ac -nocursor -retro -config /etc/X11/xorg.conf.headless > /dev/null 2>&1 &
+        else
+            # Fallback: start X without special config
+            sudo X :0 -ac -nocursor > /dev/null 2>&1 &
+        fi
+        
         local xserver_pid=$!
-
         echo "X server started with PID: $xserver_pid"
 
         # Wait for X server to be ready with better detection
@@ -112,7 +117,7 @@ start_xserver() {
                 echo "Warning: X server process died, attempting alternative startup..."
 
                 # Try alternative method
-                startx -- -nocursor -retro > /dev/null 2>&1 &
+                startx -- -nocursor > /dev/null 2>&1 &
                 local new_pid=$!
                 echo "Alternative X server started with PID: $new_pid"
                 xserver_pid=$new_pid
@@ -128,6 +133,83 @@ start_xserver() {
         return 1
     fi
     return 0
+}
+
+# Function to display a black screen
+show_black_screen() {
+    echo "Displaying a black screen..."
+    
+    # Start X server first for Lite version
+    if is_lite_version; then
+        start_xserver
+    fi
+    
+    # Wait a bit for X server to stabilize
+    sleep 3
+    
+    # Set black background
+    if is_xserver_running; then
+        xsetroot -solid black 2>/dev/null && echo "Black screen set successfully"
+
+        # Hide mouse pointer if X is available
+        if command -v unclutter &> /dev/null; then
+            unclutter -idle 0.1 -root &
+            echo "Mouse pointer hidden"
+        fi
+    else
+        echo "Warning: Cannot set black screen - X server not available"
+    fi
+}
+
+# Function to read WiFi configuration from device config
+get_configured_wifi() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local ssid=$(grep -o '"ssid": *"[^"]*"' "$CONFIG_FILE" | head -1 | cut -d'"' -f4)
+        if [[ -n "$ssid" ]]; then
+            echo "$ssid"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Function to Connect to WiFi with dynamic configuration
+connect_to_configured_wifi() {
+    local ssid=$(get_configured_wifi)
+    
+    if [[ -n "$ssid" ]]; then
+        echo "Found configured WiFi in device config: $ssid"
+        echo "Note: WiFi password should be configured via admin dashboard"
+    else
+        echo "No WiFi configuration found in device config"
+        echo "Please configure WiFi via the admin dashboard"
+    fi
+    
+    # Check current connection
+    if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+        if command -v nmcli &> /dev/null; then
+            local current_ssid=$(nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2)
+            echo "Currently connected to: $current_ssid"
+        else
+            echo "Network connected (nmcli not available)"
+        fi
+        return 0
+    else
+        echo "No internet connection available"
+        return 1
+    fi
+}
+
+# Start a Background WiFi Monitor
+monitor_wifi() {
+    echo "Starting WiFi monitor..."
+    while true; do
+        if ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+            echo "Internet connection lost. Attempting to reconnect..."
+            connect_to_configured_wifi
+        fi
+        sleep 300 # Check every 5 minutes
+    done &
 }
 
 # Improved ngrok handling with free trial support
@@ -149,7 +231,6 @@ start_ngrok() {
     fi
     
     echo "Starting ngrok tunnel for port 3006..."
-    
     # Kill any existing ngrok processes
     pkill -f ngrok || true
     sleep 2
@@ -332,7 +413,9 @@ force_reload_playlist() {
     
     if [[ -S "$MPV_SOCKET" ]] && command -v socat > /dev/null 2>&1; then
         echo "Sending playlist reload command to MPV..."
-        echo '{ "command": ["loadlist", "'"$PLAYLIST"'", "replace"] }' | socat - "$MPV_SOCKET" 2>/dev/null
+        # Escape the path properly for JSON
+        local escaped_playlist=$(echo "$PLAYLIST" | sed 's/"/\\"/g')
+        echo '{ "command": ["loadlist", "'"$escaped_playlist"'", "replace"] }' | socat - "$MPV_SOCKET" 2>/dev/null
         if [ $? -eq 0 ]; then
             echo "Playlist reload command sent successfully to MPV"
         else
@@ -415,7 +498,6 @@ start_mpv() {
     # Wait for MPV to initialize
     local mpv_attempts=0
     local mpv_max_attempts=10
-
     while [[ $mpv_attempts -lt $mpv_max_attempts ]]; do
         if [[ -S "$MPV_SOCKET" ]]; then
             echo "MPV IPC socket is ready (attempt $((mpv_attempts + 1)))"
@@ -459,7 +541,7 @@ start_mpv() {
             mpv_success=1
         fi
     fi
-
+    
     if [[ $mpv_success -eq 1 ]]; then
         echo "MPV playback started successfully"
         return 0
@@ -496,7 +578,7 @@ monitor_directory() {
     while true; do
         echo "Starting directory monitor..."
 
-        inotifywait -r -e create -e modify -e moved_to -e close_write --format '%w%f' "$VIDEO_DIR" | while read -r file; do
+        inotifywait -r -e create -e modify -e moved_to -e close_write --format '%w%f' "$VIDEO_DIR" 2>/dev/null | while read -r file; do
             echo "File change detected: $file"
 
             # Check if it's a video file
@@ -505,7 +587,7 @@ monitor_directory() {
 
                 # Wait for file to be completely written (for downloads)
                 sleep 5
-                
+
                 # Check if file is readable and has content
                 if [[ -f "$file" ]] && [[ -r "$file" ]] && [[ -s "$file" ]]; then
                     echo "File is ready: $file"
@@ -564,15 +646,20 @@ setup_playlist_api() {
 # Main startup sequence
 main() {
     echo "Starting ADS Display System..."
-    echo "Note: WiFi connection is managed by the Node.js application"
     
-    # For Lite version, start X server if needed
-    if is_lite_version; then
-        start_xserver
-    fi
+    # Show black screen immediately (this will start X server if needed)
+    show_black_screen
     
-    # Wait a moment for system initialization
-    sleep 2
+    # Wait for network to stabilize
+    echo "Waiting for network initialization..."
+    sleep 5
+    
+    # Connect to configured WiFi
+    echo "Setting up network connection..."
+    connect_to_configured_wifi
+    
+    # Start WiFi monitoring
+    monitor_wifi
     
     # Start ngrok tunnel (non-blocking)
     start_ngrok &
@@ -606,11 +693,9 @@ main() {
     echo "User: $USERNAME"
     echo "Base Directory: $BASE_DIR"
     echo "Time: $(date)"
-    echo "WiFi Management: ✅ HANDLED BY NODE.JS APP"
     echo "Playlist monitoring: ACTIVE"
     echo "Periodic refresh: EVERY 2 MINUTES"
     echo "Manual update: curl http://localhost:3006/api/playlist/update"
-    echo "Health check: http://localhost:3006/health"
     echo "=========================================="
     
     # Keep script running and monitor processes
