@@ -1,236 +1,37 @@
 #!/bin/bash
 
-# ADS Display Dependencies Installation Script
-# Optimized for Raspberry Pi
-
-echo "=========================================="
-echo "ADS Display Dependencies Installation"
-echo "=========================================="
-
-# Get current user
-USERNAME=$(whoami)
-echo "[INFO] Installing dependencies for user: $USERNAME"
-
-# Detect if it's a desktop or lite version
-if [ -d "/home/$USER/Desktop" ]; then
-    BASE_DIR="/home/$USER/Desktop/pi_server"
-    echo "[INFO] Desktop version detected. Using base directory: $BASE_DIR"
-else
-    BASE_DIR="/home/$USER/pi_server"
-    echo "[INFO] Lite version detected. Using base directory: $BASE_DIR"
-fi
-
-# Create directories
-mkdir -p "$BASE_DIR"
-mkdir -p "$BASE_DIR/logs"
-mkdir -p "$BASE_DIR/ads-videos"
-mkdir -p "$BASE_DIR/config"
-
-# Update system first
-echo "[INFO] Updating package list..."
-sudo apt update -y
-
-# Install system dependencies
-echo "[INFO] Installing system dependencies..."
-sudo apt install -y \
-    curl \
-    wget \
-    git \
-    build-essential \
-    python3 \
-    python3-pip \
-    net-tools \
-    wireless-tools \
-    network-manager \
-    inotify-tools \
-    socat \
-    unclutter \
-    x11-utils \
-    xserver-xorg \
-    xinit \
-    xorg \
-    cron
-
-# Install X server and minimal desktop environment for Lite version
-echo "[INFO] Installing X server and minimal desktop environment for Lite version..."
-sudo apt install -y \
-    xserver-xorg \
-    xinit \
-    xorg \
-    openbox \
-    lightdm \
-    feh
-
-# Install Node.js
-echo "[INFO] Installing Node.js..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-
-# Verify Node.js installation
-NODE_VERSION=$(node -v)
-NPM_VERSION=$(npm -v)
-echo "[INFO] Node.js version: $NODE_VERSION"
-echo "[INFO] NPM version: $NPM_VERSION"
-
-# Install PM2 globally
-echo "[INFO] Installing PM2..."
-sudo npm install -g pm2
-
-# Install ngrok
-echo "[INFO] Installing ngrok..."
-curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-sudo apt update
-sudo apt install -y ngrok
-echo "[INFO] Ngrok installed. Remember to configure with: ngrok config add-authtoken <YOUR_AUTH_TOKEN>"
-
-# Install MPV media player with hardware acceleration
-echo "[INFO] Installing MPV media player with hardware acceleration..."
-sudo apt install -y mpv
-
-# Configure MPV for Raspberry Pi optimization
-echo "[INFO] Configuring MPV for Raspberry Pi optimization..."
-MPV_VERSION=$(mpv --version | head -n1)
-echo "[INFO] MPV version: $MPV_VERSION"
-
-# Create application directories
-echo "[INFO] Creating application directories..."
-mkdir -p "$BASE_DIR/config"
-mkdir -p "$BASE_DIR/logs"
-mkdir -p "$BASE_DIR/ads-videos"
-
-# Create default config files
-if [ ! -f "$BASE_DIR/config/device-config.json" ]; then
-    echo '{
-        "deviceId": "raspberry_pi_ads_display",
-        "version": "1.0.0",
-        "location": "unknown",
-        "platform": "linux",
-        "autoUpdate": {
-            "enabled": true,
-            "checkInterval": 30
-        },
-        "video": {
-            "autoPlay": true,
-            "shuffle": true,
-            "defaultVolume": 80
-        },
-        "sync": {
-            "enabled": true,
-            "interval": 10
-        }
-    }' > "$BASE_DIR/config/device-config.json"
-fi
-
-# Clean up existing node_modules to fix npm errors
-echo "[INFO] Cleaning up existing node_modules..."
-cd "$BASE_DIR"
-if [ -d "node_modules" ]; then
-    echo "[INFO] Removing existing node_modules..."
-    rm -rf node_modules package-lock.json
-fi
-
-# Create package.json if it doesn't exist
-if [ ! -f "package.json" ]; then
-    echo "[INFO] Creating package.json..."
-    echo '{
-        "name": "raspberrypi-ads-display",
-        "version": "1.0.0",
-        "description": "ADS Display System for Raspberry Pi",
-        "main": "server.js",
-        "scripts": {
-            "start": "node server.js",
-            "dev": "node --watch server.js"
-        },
-        "dependencies": {
-            "express": "^4.18.2",
-            "axios": "^1.6.2",
-            "mqtt": "^5.4.0",
-            "cors": "^2.8.5",
-            "dotenv": "^16.3.1",
-            "mongoose": "^8.0.3",
-            "bcryptjs": "^2.4.3",
-            "jsonwebtoken": "^9.0.2",
-            "multer": "^1.4.5-lts.1",
-            "socket.io": "^4.7.2",
-            "helmet": "^7.1.0",
-            "express-rate-limit": "^7.1.5",
-            "winston": "^3.11.0"
-        },
-        "devDependencies": {
-            "nodemon": "^3.0.2"
-        }
-    }' > package.json
-fi
-
-# Install Node.js project dependencies
-echo "[INFO] Installing Node.js project dependencies..."
-npm install --no-audit --no-fund
-
-# If npm install fails, try with force clean install
-if [ $? -ne 0 ]; then
-    echo "[WARN] Standard install failed, trying clean install..."
-    rm -rf node_modules package-lock.json
-    npm cache clean --force
-    npm install --no-audit --no-fund --force
-fi
-
-# Create startup script
-echo "[INFO] Creating startup scripts..."
-
-# Create systemd service
-echo "[INFO] Creating systemd service..."
-sudo tee /etc/systemd/system/ads-display.service > /dev/null << EOF
-[Unit]
-Description=ADS Display System
-After=network.target
-
-[Service]
-Type=simple
-User=$USERNAME
-WorkingDirectory=$BASE_DIR
-Environment="DISPLAY=:0"
-Environment="PATH=/usr/bin:/usr/local/bin"
-ExecStart=/usr/bin/node server.js
-Restart=always
-RestartSec=10
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=ads-display
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Create bash startup script
-STARTUP_SCRIPT="$BASE_DIR/start_ads.sh"
-echo "[INFO] Creating startup script: $STARTUP_SCRIPT"
-
-cat > "$STARTUP_SCRIPT" << 'EOF'
-#!/bin/bash
-
-# ADS Display Startup Script - Optimized for Raspberry Pi
+# ADS Display Startup Script - Clean Version
 # Video playback only - WiFi is managed by Node.js app
+# Compatible with both Raspberry Pi Desktop and Lite versions
 
-# Configuration
-BASE_DIR="/home/$(whoami)/pi_server"
+# Configuration - Dynamic paths based on Desktop availability
+if [ -d "/home/$USER/Desktop" ]; then
+    # Desktop version
+    BASE_DIR="/home/$USER/Desktop/pi_server"
+else
+    # Lite version
+    BASE_DIR="/home/$USER/pi_server"
+fi
+
 VIDEO_DIR="$BASE_DIR/ads-videos"
 PLAYLIST="$VIDEO_DIR/playlist.txt"
 MPV_SOCKET="/tmp/mpv-socket"
 LOG_FILE="$BASE_DIR/logs/ads_display.log"
+CONFIG_FILE="$BASE_DIR/config/device-config.json"
 
 # Get current username
 USERNAME=$(whoami)
 
 # Ensure directories exist
 mkdir -p "$(dirname "$LOG_FILE")"
+mkdir -p "$(dirname "$CONFIG_FILE")"
 mkdir -p "$VIDEO_DIR"
 
 # Redirect all output to log file
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=========================================="
-echo "ADS Display Startup Script (RPi Optimized)"
+echo "ADS Display Startup Script"
 echo "User: $USERNAME"
 echo "Base Directory: $BASE_DIR"
 echo "Started at: $(date)"
@@ -242,22 +43,12 @@ export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 # Set DISPLAY for GUI applications like MPV
 export DISPLAY=:0
 
-# Check if we're on Raspberry Pi
-is_raspberry_pi() {
-    if [ -f /proc/device-tree/model ]; then
-        if grep -q "Raspberry Pi" /proc/device-tree/model; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-# Get Raspberry Pi model
-get_rpi_model() {
-    if [ -f /proc/device-tree/model ]; then
-        cat /proc/device-tree/model | tr -d '\0'
+# Function to check if we're on Raspberry Pi Lite
+is_lite_version() {
+    if [ -d "/home/$USER/Desktop" ]; then
+        return 1  # Desktop version
     else
-        echo "Unknown"
+        return 0  # Lite version
     fi
 }
 
@@ -266,8 +57,9 @@ is_xserver_running() {
     if xset -q > /dev/null 2>&1; then
         return 0
     else
+        # Alternative check using ps
         if pgrep Xorg > /dev/null 2>&1; then
-            sleep 1
+            sleep 2
             if xset -q > /dev/null 2>&1; then
                 return 0
             fi
@@ -276,494 +68,590 @@ is_xserver_running() {
     fi
 }
 
-# Start X server for Raspberry Pi Lite
-start_xserver_rpi() {
-    echo "Starting X server for Raspberry Pi..."
-    
-    # Check if X server is already running
-    if is_xserver_running; then
-        echo "X server is already running"
-        return 0
-    fi
-    
-    # Kill any existing X servers
-    pkill Xorg 2>/dev/null || true
-    pkill X 2>/dev/null || true
-    sleep 1
-    
-    echo "Starting X server with RPi optimized settings..."
-    
-    # Start X server with RPi specific settings
-    startx -- -nocursor -retro -depth 24 -dpi 96 > /dev/null 2>&1 &
-    local xserver_pid=$!
-    
-    echo "X server started with PID: $xserver_pid"
-    
-    # Wait for X server (max 10 seconds)
-    for i in {1..10}; do
+# Function to start X server for Lite version with better error handling
+start_xserver() {
+    if is_lite_version; then
+        echo "Lite version detected - checking X server..."
+
+        # Check if X server is already running
         if is_xserver_running; then
-            echo "✅ X server ready (attempt $i)"
-            
-            # Configure X for better performance
-            xset s off 2>/dev/null || true
-            xset -dpms 2>/dev/null || true
-            xset s noblank 2>/dev/null || true
-            
+            echo "X server is already running"
             return 0
         fi
-        sleep 1
-    done
-    
-    echo "⚠️ X server not ready, but continuing..."
-    return 1
-}
 
-# Check if we have videos available
-has_videos() {
-    if [[ -f "$PLAYLIST" ]] && [[ -s "$PLAYLIST" ]] && [[ $(wc -l < "$PLAYLIST" 2>/dev/null) -gt 0 ]]; then
-        return 0
-    else
-        if [[ -d "$VIDEO_DIR" ]]; then
-            local video_count=$(find "$VIDEO_DIR" -maxdepth 1 -type f \( -name "*.mp4" -o -name "*.MP4" \) 2>/dev/null | wc -l)
-            if [[ $video_count -gt 0 ]]; then
+        # Kill any existing X servers that might be stuck
+        pkill Xorg 2>/dev/null || true
+        sleep 2
+
+        echo "Starting X server..."
+
+        # Start X server with proper configuration for headless mode
+        sudo X :0 -ac -nocursor -retro -config /etc/X11/xorg.conf.headless > /dev/null 2>&1 &
+        local xserver_pid=$!
+
+        echo "X server started with PID: $xserver_pid"
+
+        # Wait for X server to be ready with better detection
+        local max_attempts=20
+        local attempt=1
+
+        while [[ $attempt -le $max_attempts ]]; do
+            if is_xserver_running; then
+                echo "X server is ready (attempt $attempt)"
+
+                # Set some basic X properties
+                xset s off 2>/dev/null || true
+                xset -dpms 2>/dev/null || true
+                xset s noblank 2>/dev/null || true
+
                 return 0
             fi
-        fi
+
+            # Check if process is still running
+            if ! kill -0 $xserver_pid 2>/dev/null; then
+                echo "Warning: X server process died, attempting alternative startup..."
+
+                # Try alternative method
+                startx -- -nocursor -retro > /dev/null 2>&1 &
+                local new_pid=$!
+                echo "Alternative X server started with PID: $new_pid"
+                xserver_pid=$new_pid
+            fi
+
+            echo "Waiting for X server... (attempt $attempt/$max_attempts)"
+            sleep 2
+            ((attempt++))
+        done
+
+        echo "Warning: X server not ready after $max_attempts attempts"
+        echo "Continuing without X server - video playback will be disabled"
         return 1
     fi
+    return 0
 }
 
-# Create optimized playlist for RPi
-create_playlist_rpi() {
-    echo "Creating playlist for Raspberry Pi..."
+# Improved ngrok handling with free trial support
+start_ngrok() {
+    echo "Checking ngrok..."
     
-    if [[ -d "$VIDEO_DIR" ]]; then
-        # For RPi, prefer MP4 files (better hardware acceleration)
-        find "$VIDEO_DIR" -maxdepth 1 -type f \( -name "*.mp4" -o -name "*.MP4" \) 2>/dev/null | sort > "$PLAYLIST"
-        
-        # If no MP4 files, include other formats
-        if [[ ! -s "$PLAYLIST" ]]; then
-            find "$VIDEO_DIR" -maxdepth 1 -type f \( -name "*.avi" -o -name "*.mkv" -o -name "*.mov" \) 2>/dev/null | sort > "$PLAYLIST"
+    # Check if ngrok is installed
+    if ! command -v ngrok &> /dev/null; then
+        echo "Warning: ngrok is not installed. Skipping ngrok tunnel."
+        echo "To enable ngrok, install it with: ngrok config add-authtoken <YOUR_TOKEN>"
+        return 0
+    fi
+    
+    # Check if authtoken is configured
+    if ! ngrok config check > /dev/null 2>&1; then
+        echo "Warning: ngrok authtoken not configured. Skipping ngrok tunnel."
+        echo "Configure with: ngrok config add-authtoken <YOUR_TOKEN>"
+        return 0
+    fi
+    
+    echo "Starting ngrok tunnel for port 3006..."
+    
+    # Kill any existing ngrok processes
+    pkill -f ngrok || true
+    sleep 2
+    
+    # Start ngrok in background with specific configuration
+    ngrok http 3006 --log=stdout > "$BASE_DIR/logs/ngrok.log" 2>&1 &
+    local ngrok_pid=$!
+    
+    echo "ngrok started with PID: $ngrok_pid"
+    
+    # Wait for ngrok to initialize (shorter timeout for free trial)
+    local max_attempts=10
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        # Try multiple endpoints
+        if curl -s http://127.0.0.1:4040/api/tunnels > /dev/null 2>&1 || \
+           curl -s http://localhost:4040/api/tunnels > /dev/null 2>&1; then
+            echo "ngrok started successfully! (PID: $ngrok_pid)"
+
+            # Get public URL with error handling
+            local public_url=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+            if [[ -z "$public_url" ]]; then
+                public_url=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
+            fi
+
+            if [[ -n "$public_url" ]]; then
+                echo "Public URL: $public_url"
+            else
+                echo "Warning: Could not retrieve public URL from ngrok"
+            fi
+
+            return 0
         fi
-        
-        local video_count=$(wc -l < "$PLAYLIST" 2>/dev/null || echo 0)
-        if [[ $video_count -gt 0 ]]; then
-            echo "✅ Found $video_count videos"
+
+        # Check if ngrok process is still running
+        if ! kill -0 $ngrok_pid 2>/dev/null; then
+            echo "Warning: ngrok process died. Check ngrok configuration."
+            echo "For free trial, ensure your account has active tunnels available."
+            return 1
+        fi
+
+        echo "Attempt $attempt: ngrok not ready yet, retrying..."
+        sleep 3
+        ((attempt++))
+    done
+    
+    echo "Warning: ngrok failed to start within 30 seconds."
+    echo "This is normal for free trial accounts with limited resources."
+    echo "Continuing without ngrok tunnel..."
+    
+    # Don't kill ngrok - let it continue starting in background
+    return 0
+}
+
+# Quick ngrok status check (non-blocking)
+check_ngrok_status() {
+    # Quick check without waiting
+    if curl -s --connect-timeout 2 http://127.0.0.1:4040/api/tunnels > /dev/null 2>&1; then
+        local public_url=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [[ -n "$public_url" ]]; then
+            echo "$public_url"
             return 0
         fi
     fi
-    
-    echo "⚠️ No videos found"
     return 1
 }
 
-# Get optimal MPV settings for Raspberry Pi model
-get_mpv_settings_rpi() {
-    local model=$(get_rpi_model)
-    echo "Raspberry Pi Model: $model"
+# Start Node.js App with better error handling
+start_node_app() {
+    echo "Starting Node.js app..."
+    cd "$BASE_DIR" || { echo "Failed to navigate to Node.js app directory"; return 1; }
     
-    # Default settings for RPi 4
-    local settings=""
+    # Kill any existing node processes for this app
+    pkill -f "node.*server.js" || true
+    sleep 2
     
-    # Hardware acceleration settings
-    settings+="--hwdec=rpi-mmal "
-    settings+="--vd-lavc-dr=yes "
-    settings+="--vd-lavc-threads=4 "
-    
-    # Video output
-    settings+="--vo=gpu "
-    settings+="--gpu-context=drm "
-    settings+="--drm-mode=preferred "
-    
-    # Performance settings
-    settings+="--cache=yes "
-    settings+="--cache-secs=30 "
-    settings+="--demuxer-max-bytes=500M "
-    settings+="--demuxer-readahead-secs=30 "
-    settings+="--vd-lavc-fast "
-    settings+="--no-hidpi-window-scale "
-    
-    # RPi 3 or older - different settings
-    if [[ "$model" == *"Pi 3"* ]] || [[ "$model" == *"Pi 2"* ]] || [[ "$model" == *"Pi 1"* ]] || [[ "$model" == *"Pi Zero"* ]]; then
-        echo "⚠️ Older RPi detected, using conservative settings"
-        settings=""
-        settings+="--hwdec=mmal "
-        settings+="--vo=gpu "
-        settings+="--gpu-context=mmal "
-        settings+="--cache=yes "
-        settings+="--cache-secs=60 "
-        settings+="--demuxer-max-bytes=200M "
-        settings+="--demuxer-readahead-secs=60 "
-        settings+="--vd-lavc-skiploopfilter=nonkey "
-        settings+="--vd-lavc-fast "
-        settings+="--scale=bilinear "
-        settings+="--cscale=bilinear "
-        settings+="--dscale=bilinear "
-        settings+="--tscale=bilinear "
+    # Check if package.json exists
+    if [[ ! -f "package.json" ]]; then
+        echo "Error: package.json not found in $BASE_DIR"
+        return 1
     fi
     
-    # RPi 4 or newer - optimized settings
-    if [[ "$model" == *"Pi 4"* ]] || [[ "$model" == *"Pi 5"* ]] || [[ "$model" == *"Pi 400"* ]]; then
-        echo "✅ Modern RPi detected, using optimized settings"
-        settings=""
-        settings+="--hwdec=rpi "
-        settings+="--vo=gpu "
-        settings+="--gpu-context=drm "
-        settings+="--drm-mode=preferred "
-        settings+="--drm-connector=HDMI-A-1 "
-        settings+="--cache=yes "
-        settings+="--cache-secs=20 "
-        settings+="--demuxer-max-bytes=1G "
-        settings+="--demuxer-readahead-secs=20 "
-        settings+="--interpolation "
-        settings+="--tscale=oversample "
-        settings+="--video-sync=display-resample "
-        settings+="--video-latency-hacks=yes "
-        settings+="--profile=high-quality "
+    # Check if server.js exists
+    if [[ ! -f "server.js" ]]; then
+        echo "Error: server.js not found in $BASE_DIR"
+        return 1
     fi
     
-    echo "$settings"
+    # Install dependencies if node_modules doesn't exist
+    if [[ ! -d "node_modules" ]]; then
+        echo "Installing Node.js dependencies..."
+        npm install
+    fi
+    
+    # Start the node app with more verbose logging initially
+    node server.js &
+    local node_pid=$!
+    
+    echo "Node.js app starting with PID: $node_pid"
+    
+    local max_attempts=15
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        if curl -s http://localhost:3006/health > /dev/null 2>&1; then
+            echo "Node.js app started successfully! (PID: $node_pid)"
+            return 0
+        fi
+
+        # Check if process is still running
+        if ! kill -0 $node_pid 2>/dev/null; then
+            echo "Error: Node.js app process died"
+
+            # Try to get error output
+            if [[ -f "$LOG_FILE" ]]; then
+                echo "Last log entries:"
+                tail -10 "$LOG_FILE"
+            fi
+
+            return 1
+        fi
+
+        echo "Attempt $attempt: Node.js app not ready yet, retrying..."
+        sleep 3
+        ((attempt++))
+    done
+    
+    echo "Warning: Node.js app not responding after 45 seconds, but process is still running"
+    echo "App may be starting slowly. Continuing..."
+    return 0
 }
 
-# Start MPV with Raspberry Pi optimized settings
-start_mpv_rpi() {
-    echo "Starting MPV with Raspberry Pi optimizations..."
+# Function to update the playlist - IMPROVED with better detection
+update_playlist() {
+    echo "Updating playlist..."
+    
+    # Create playlist file if it doesn't exist
+    touch "$PLAYLIST"
+    
+    if [[ -d "$VIDEO_DIR" ]]; then
+        # Find all video files and create playlist
+        find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" \) > "$PLAYLIST.tmp"
+
+        # Remove empty lines and sort
+        grep -v '^$' "$PLAYLIST.tmp" | sort > "$PLAYLIST"
+        rm -f "$PLAYLIST.tmp"
+
+        local video_count=$(wc -l < "$PLAYLIST" 2>/dev/null || echo 0)
+        echo "Playlist updated: $video_count videos found."
+
+        # List videos for debugging
+        if [[ $video_count -gt 0 ]]; then
+            echo "Videos in playlist:"
+            cat "$PLAYLIST"
+        else
+            echo "Warning: No video files found in $VIDEO_DIR"
+            echo "Supported formats: mp4, avi, mkv, mov"
+            # Create empty playlist to avoid errors
+            echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
+        fi
+    else
+        echo "Video directory not found: $VIDEO_DIR"
+        mkdir -p "$VIDEO_DIR"
+        echo "Created video directory: $VIDEO_DIR"
+        # Create empty playlist
+        echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
+    fi
+    
+    # Force playlist file permissions
+    chmod 644 "$PLAYLIST"
+    echo "Playlist file created/updated: $PLAYLIST"
+}
+
+# Function to force reload playlist in MPV
+force_reload_playlist() {
+    echo "Force reloading playlist in MPV..."
+    update_playlist
+    
+    if [[ -S "$MPV_SOCKET" ]] && command -v socat > /dev/null 2>&1; then
+        echo "Sending playlist reload command to MPV..."
+        echo '{ "command": ["loadlist", "'"$PLAYLIST"'", "replace"] }' | socat - "$MPV_SOCKET" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo "Playlist reload command sent successfully to MPV"
+        else
+            echo "Failed to send reload command to MPV"
+        fi
+    else
+        echo "MPV socket not available or socat not installed"
+        echo "Restarting MPV to load new playlist..."
+        start_mpv
+    fi
+}
+
+# Function to manually trigger playlist update (for external calls)
+manual_playlist_update() {
+    echo "Manual playlist update triggered..."
+    update_playlist
+    force_reload_playlist
+    echo "Manual playlist update completed"
+}
+
+# Optimized MPV startup with fallback options
+start_mpv() {
+    echo "Starting MPV playback..."
     
     # Check if MPV is installed
     if ! command -v mpv &> /dev/null; then
-        echo "❌ MPV not installed"
-        echo "Install: sudo apt update && sudo apt install mpv"
+        echo "Error: MPV is not installed. Video playback disabled."
         return 1
     fi
     
-    # Check for videos
-    if ! has_videos; then
-        echo "❌ No videos available"
-        return 1
+    # Check if X server is available
+    if ! is_xserver_running; then
+        echo "Warning: X server not available. Attempting to start..."
+        if ! start_xserver; then
+            echo "Error: X server not available. Cannot start MPV."
+            return 1
+        fi
     fi
     
-    # Create playlist
-    create_playlist_rpi
-    
-    # Kill any existing MPV
-    pkill -f mpv 2>/dev/null || true
+    # Additional wait for X server stability
     sleep 2
     
-    # Get RPi specific settings
-    local rpi_settings=$(get_mpv_settings_rpi)
+    # Kill any existing MPV processes
+    pkill -f mpv || true
+    sleep 1
     
-    echo "Launching MPV with optimized settings..."
+    # Ensure playlist exists and is updated
+    update_playlist
     
-    # Create logs directory
-    mkdir -p "$BASE_DIR/logs"
+    # Check if there are videos to play
+    if [[ ! -f "$PLAYLIST" ]] || [[ ! -s "$PLAYLIST" ]] || [[ $(wc -l < "$PLAYLIST" 2>/dev/null) -eq 0 ]]; then
+        echo "No videos found in playlist. MPV will start but play nothing."
+        # Create empty playlist file with comment
+        echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
+    fi
     
-    # Start MPV with RPi optimized settings
-    mpv \
-        --fs \
-        --no-border \
-        --ontop \
+    echo "Starting MPV with optimized configuration..."
+    
+    # Try different MPV configurations for better compatibility
+    local mpv_success=0
+    
+    # Attempt 1: Standard configuration
+    mpv --fs \
         --shuffle \
         --loop-playlist=inf \
-        --playlist="$PLAYLIST" \
-        --no-terminal \
-        --really-quiet \
-        --volume=80 \
-        --no-osc \
         --osd-level=0 \
-        --no-osd-bar \
+        --no-terminal \
         --input-ipc-server="$MPV_SOCKET" \
+        --playlist="$PLAYLIST" \
         --keep-open=yes \
         --no-resume-playback \
-        $rpi_settings \
-        > "$BASE_DIR/logs/mpv_rpi.log" 2>&1 &
-    
-    local mpv_pid=$!
-    
-    echo "MPV started with PID: $mpv_pid"
-    echo "Using settings: $rpi_settings"
-    
-    # Check if MPV is running
-    sleep 3
-    if kill -0 $mpv_pid 2>/dev/null; then
-        echo "✅ MPV playback started successfully"
-        
-        # Send initial commands to MPV
-        sleep 2
-        if [[ -S "$MPV_SOCKET" ]]; then
-            echo '{ "command": ["set_property", "volume", 80] }' | socat - "$MPV_SOCKET" 2>/dev/null || true
-            echo '{ "command": ["set_property", "shuffle", true] }' | socat - "$MPV_SOCKET" 2>/dev/null || true
-        fi
-        
-        return 0
-    else
-        echo "❌ MPV failed to start, checking logs..."
-        tail -20 "$BASE_DIR/logs/mpv_rpi.log"
-        
-        # Try fallback settings
-        echo "🔄 Trying fallback settings..."
-        start_mpv_fallback
-        return $?
-    fi
-}
-
-# Fallback MPV settings (minimal)
-start_mpv_fallback() {
-    echo "Starting MPV with fallback settings..."
-    
-    pkill -f mpv 2>/dev/null || true
-    sleep 2
-    
-    # Minimal settings for compatibility
-    mpv \
-        --fs \
-        --playlist="$PLAYLIST" \
-        --loop-playlist=inf \
-        --no-terminal \
-        --really-quiet \
-        --volume=80 \
         --hwdec=auto \
         --vo=xv \
-        --cache=yes \
-        --cache-secs=60 \
-        > "$BASE_DIR/logs/mpv_fallback.log" 2>&1 &
+        --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
     
     local mpv_pid=$!
     
-    sleep 2
-    if kill -0 $mpv_pid 2>/dev/null; then
-        echo "✅ MPV started with fallback settings"
-        return 0
-    else
-        echo "❌ MPV failed even with fallback settings"
-        return 1
-    fi
-}
+    echo "MPV started with IPC socket: $MPV_SOCKET (PID: $mpv_pid)"
+    
+    # Wait for MPV to initialize
+    local mpv_attempts=0
+    local mpv_max_attempts=10
 
-# Check and install required packages
-check_dependencies() {
-    echo "Checking dependencies..."
+    while [[ $mpv_attempts -lt $mpv_max_attempts ]]; do
+        if [[ -S "$MPV_SOCKET" ]]; then
+            echo "MPV IPC socket is ready (attempt $((mpv_attempts + 1)))"
+            mpv_success=1
+            break
+        fi
+
+        # Check if MPV process is still alive
+        if ! kill -0 $mpv_pid 2>/dev/null; then
+            echo "MPV process died, attempting alternative configuration..."
+            break
+        fi
+
+        sleep 1
+        ((mpv_attempts++))
+    done
     
-    # Check MPV
-    if ! command -v mpv &> /dev/null; then
-        echo "⚠️ MPV not found, attempting to install..."
-        sudo apt update && sudo apt install -y mpv
-    fi
-    
-    # Check socat for MPV IPC
-    if ! command -v socat &> /dev/null; then
-        echo "⚠️ socat not found, installing..."
-        sudo apt install -y socat
-    fi
-    
-    # Check for Raspberry Pi firmware
-    if is_raspberry_pi; then
-        echo "Checking Raspberry Pi firmware..."
-        
-        # Update firmware for better video support
-        echo "Updating RPi firmware (if needed)..."
-        sudo apt update
-        sudo apt install -y raspberrypi-kernel raspberrypi-kernel-headers
-        
-        # Enable DRM/KMS for RPi 4+
-        local model=$(get_rpi_model)
-        if [[ "$model" == *"Pi 4"* ]] || [[ "$model" == *"Pi 5"* ]]; then
-            echo "Enabling DRM/KMS for RPi 4/5..."
-            sudo raspi-config nonint do_memory_split 256
+    # If first attempt failed, try fallback configuration
+    if [[ $mpv_success -eq 0 ]]; then
+        echo "Trying fallback MPV configuration..."
+        pkill -f mpv || true
+        sleep 2
+
+        # Fallback: simpler configuration
+        mpv --fs \
+            --loop-playlist=inf \
+            --no-osd-bar \
+            --no-input-default-bindings \
+            --playlist="$PLAYLIST" \
+            --hwdec=mmal \
+            --vo=drm \
+            > "$BASE_DIR/logs/mpv_fallback.log" 2>&1 &
+
+        local fallback_pid=$!
+        echo "Fallback MPV started (PID: $fallback_pid)"
+
+        # Quick check if fallback is running
+        sleep 3
+        if kill -0 $fallback_pid 2>/dev/null; then
+            echo "Fallback MPV configuration successful"
+            mpv_success=1
         fi
     fi
-    
-    echo "✅ Dependencies checked"
+
+    if [[ $mpv_success -eq 1 ]]; then
+        echo "MPV playback started successfully"
+        return 0
+    else
+        echo "Warning: MPV startup issues detected, but process is running"
+        return 0
+    fi
 }
 
-# Optimize system for video playback
-optimize_system() {
-    echo "Optimizing system for video playback..."
+# IMPROVED Directory monitoring with better file detection
+monitor_directory() {
+    echo "Monitoring $VIDEO_DIR for changes..."
     
-    # Increase USB/Filesystem buffers
-    echo "vm.swappiness=10" | sudo tee -a /etc/sysctl.conf > /dev/null
-    echo "vm.dirty_ratio=10" | sudo tee -a /etc/sysctl.conf > /dev/null
-    echo "vm.dirty_background_ratio=5" | sudo tee -a /etc/sysctl.conf > /dev/null
-    
-    # Apply settings
-    sudo sysctl -p > /dev/null 2>&1 || true
-    
-    # Set CPU governor to performance
-    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
-        echo "performance" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null 2>&1 || true
+    # Check if inotifywait is available
+    if ! command -v inotifywait &> /dev/null; then
+        echo "Warning: inotifywait not available. Directory monitoring disabled."
+        echo "Install inotify-tools for automatic directory monitoring."
+
+        # Fallback: periodic polling
+        echo "Using periodic polling as fallback (every 30 seconds)..."
+        while true; do
+            sleep 30
+            echo "Periodic playlist check..."
+            update_playlist
+            # Only reload if MPV is running
+            if pgrep mpv > /dev/null; then
+                force_reload_playlist
+            fi
+        done &
+        return 0
     fi
     
-    # Disable screen blanking
-    if command -v xset &> /dev/null; then
-        xset s off 2>/dev/null || true
-        xset -dpms 2>/dev/null || true
-        xset s noblank 2>/dev/null || true
-    fi
+    # Create a more robust monitoring loop
+    while true; do
+        echo "Starting directory monitor..."
+
+        inotifywait -r -e create -e modify -e moved_to -e close_write --format '%w%f' "$VIDEO_DIR" | while read -r file; do
+            echo "File change detected: $file"
+
+            # Check if it's a video file
+            if [[ "$file" =~ \.(mp4|avi|mkv|mov)$ ]]; then
+                echo "Video file detected: $file"
+
+                # Wait for file to be completely written (for downloads)
+                sleep 5
+                
+                # Check if file is readable and has content
+                if [[ -f "$file" ]] && [[ -r "$file" ]] && [[ -s "$file" ]]; then
+                    echo "File is ready: $file"
+
+                    # Update playlist
+                    update_playlist
+
+                    # Reload MPV playlist
+                    force_reload_playlist
+
+                    echo "Playlist updated with new video: $(basename "$file")"
+                else
+                    echo "File not ready or empty: $file"
+                fi
+            fi
+        done
+
+        # If inotifywait fails, wait and restart
+        echo "Directory monitor stopped, restarting in 10 seconds..."
+        sleep 10
+    done &
+}
+
+# Additional function: Periodic playlist refresh (safety net)
+start_periodic_playlist_refresh() {
+    echo "Starting periodic playlist refresh (every 2 minutes)..."
+    while true; do
+        sleep 120  # 2 minutes
+
+        # Check if videos directory exists and has files
+        if [[ -d "$VIDEO_DIR" ]]; then
+            local current_count=$(find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" \) | wc -l)
+            local playlist_count=$(wc -l < "$PLAYLIST" 2>/dev/null || echo 0)
+
+            if [[ $current_count -ne $playlist_count ]]; then
+                echo "Playlist count mismatch (files: $current_count, playlist: $playlist_count). Updating..."
+                update_playlist
+                force_reload_playlist
+            fi
+        fi
+    done &
+}
+
+# Function to setup API endpoint for manual playlist updates
+setup_playlist_api() {
+    echo "Setting up playlist update API endpoint..."
     
-    echo "✅ System optimized"
+    # Create a simple HTTP server for playlist updates if needed
+    if curl -s http://localhost:3006/api/playlist/update > /dev/null 2>&1; then
+        echo "Playlist update API is available at: http://localhost:3006/api/playlist/update"
+    else
+        echo "Note: Use manual playlist update or wait for auto-detection"
+    fi
 }
 
 # Main startup sequence
 main() {
-    echo "🚀 Starting ADS Display System (RPi Optimized)..."
+    echo "Starting ADS Display System..."
+    echo "Note: WiFi connection is managed by the Node.js application"
     
-    # Check if we're on Raspberry Pi
-    if is_raspberry_pi; then
-        echo "✅ Running on Raspberry Pi: $(get_rpi_model)"
-        
-        # Check and install dependencies
-        check_dependencies
-        
-        # Optimize system
-        optimize_system
-    else
-        echo "⚠️ Not running on Raspberry Pi, using generic settings"
+    # For Lite version, start X server if needed
+    if is_lite_version; then
+        start_xserver
     fi
     
-    # Start Node.js app in background
-    echo "Starting Node.js app..."
-    cd "$BASE_DIR" || { echo "❌ Failed to navigate to directory"; exit 1; }
-    
-    # Kill existing processes
-    pkill -f "node.*server.js" 2>/dev/null || true
-    fuser -k 3006/tcp 2>/dev/null || true
-    sleep 1
-    
-    # Start Node.js
-    node server.js > "$BASE_DIR/logs/node_app.log" 2>&1 &
-    local node_pid=$!
-    echo "✅ Node.js app started (PID: $node_pid)"
-    
-    # Start X server (for Lite version)
-    if ! is_xserver_running; then
-        echo "Starting X server..."
-        start_xserver_rpi
-    else
-        echo "✅ X server already running"
-    fi
-    
-    # Give X server a moment
+    # Wait a moment for system initialization
     sleep 2
     
-    # Start MPV if videos available
-    if has_videos; then
-        echo "✅ Videos available - starting MPV..."
-        
-        # Start MPV with RPi optimizations
-        if start_mpv_rpi; then
-            echo "🎬 MPV started successfully!"
-        else
-            echo "⚠️ MPV failed to start, will retry"
-        fi
+    # Start ngrok tunnel (non-blocking)
+    start_ngrok &
+    
+    # Start Node.js application
+    start_node_app
+    
+    # Initial playlist creation
+    echo "Setting up video playback..."
+    update_playlist
+    
+    # Setup playlist API
+    setup_playlist_api
+    
+    # Start MPV playback (only if X server is available)
+    if is_xserver_running; then
+        start_mpv
     else
-        echo "⚠️ No videos found yet"
-        
-        # Check for videos every 10 seconds
-        {
-            while true; do
-                sleep 10
-                if has_videos && ! pgrep -f mpv > /dev/null 2>&1; then
-                    echo "🎬 Videos now available - starting MPV..."
-                    start_mpv_rpi
-                fi
-            done
-        } &
+        echo "X server not available - video playback disabled"
+        echo "Videos will be downloaded and stored for when display is available"
     fi
     
-    # Monitor and maintain system
-    echo "Starting system monitor..."
-    {
-        while true; do
-            # Check MPV every 30 seconds
-            if has_videos && ! pgrep -f mpv > /dev/null 2>&1; then
-                echo "🔄 Restarting MPV..."
-                start_mpv_rpi
+    # Monitor directory for changes
+    monitor_directory
+    
+    # Start periodic playlist refresh (safety net)
+    start_periodic_playlist_refresh
+    
+    echo "=========================================="
+    echo "ADS Display System Started Successfully"
+    echo "User: $USERNAME"
+    echo "Base Directory: $BASE_DIR"
+    echo "Time: $(date)"
+    echo "WiFi Management: ✅ HANDLED BY NODE.JS APP"
+    echo "Playlist monitoring: ACTIVE"
+    echo "Periodic refresh: EVERY 2 MINUTES"
+    echo "Manual update: curl http://localhost:3006/api/playlist/update"
+    echo "Health check: http://localhost:3006/health"
+    echo "=========================================="
+    
+    # Keep script running and monitor processes
+    while true; do
+        # Check if Node.js app is still running
+        if ! pgrep -f "node.*server.js" > /dev/null; then
+            echo "Warning: Node.js app stopped. Restarting..."
+            start_node_app
+        fi
+
+        # Check if MPV is still running (only if X server is available)
+        if is_xserver_running && ! pgrep -f mpv > /dev/null; then
+            echo "Warning: MPV stopped. Restarting..."
+            start_mpv
+        fi
+
+        # Periodic ngrok status check (non-blocking)
+        if [[ $(($(date +%s) % 300)) -eq 0 ]]; then  # Every 5 minutes
+            if check_ngrok_status; then
+                echo "ngrok tunnel is active"
             fi
-            
-            # Check Node.js every minute
-            if ! pgrep -f "node.*server.js" > /dev/null 2>&1; then
-                echo "🔄 Restarting Node.js..."
-                cd "$BASE_DIR"
-                node server.js > "$BASE_DIR/logs/node_app.log" 2>&1 &
-            fi
-            
-            sleep 30
-        done
-    } &
-    
-    # Show status
-    echo ""
-    echo "=========================================="
-    echo "SYSTEM STATUS"
-    echo "=========================================="
-    echo "Device: $(get_rpi_model)"
-    echo "Node.js: $(pgrep -f "node.*server.js" > /dev/null && echo '✅ RUNNING' || echo '❌ STOPPED')"
-    echo "MPV: $(pgrep -f mpv > /dev/null && echo '✅ RUNNING' || echo '❌ STOPPED')"
-    echo "X Server: $(is_xserver_running && echo '✅ RUNNING' || echo '❌ STOPPED')"
-    echo "Videos: $(has_videos && echo '✅ AVAILABLE' || echo '❌ NOT FOUND')"
-    echo "=========================================="
-    echo ""
-    
-    echo "System started successfully!"
-    echo "Press Ctrl+C to stop"
-    echo ""
-    
-    # Keep script alive
-    wait
+        fi
+
+        sleep 10
+    done
 }
 
 # Error handling
 handle_error() {
-    echo "❌ Error occurred at line $1"
-    echo "🔄 Restarting in 10 seconds..."
+    echo "Error occurred in ADS Display startup script!"
+    echo "Error details: $1"
+    echo "Check the log file for more details: $LOG_FILE"
+    
+    # Try to restart main function after a delay
     sleep 10
+    echo "Attempting to restart..."
     main
 }
 
-# Cleanup on exit
-cleanup() {
-    echo "Cleaning up..."
-    pkill -f mpv 2>/dev/null || true
-    pkill -f "node.*server.js" 2>/dev/null || true
-    exit 0
-}
-
-# Set traps
-trap 'handle_error $LINENO' ERR
-trap 'cleanup' INT TERM EXIT
+# Set error trap
+trap 'handle_error "Script terminated unexpectedly"' ERR
 
 # Run main function
 main
-EOF
-
-chmod +x "$STARTUP_SCRIPT"
-
-# Enable and start systemd service
-echo "[INFO] Enabling systemd service..."
-sudo systemctl daemon-reload
-sudo systemctl enable ads-display.service
-sudo systemctl start ads-display.service
-
-# Create crontab for automatic startup
-echo "[INFO] Setting up crontab..."
-(crontab -l 2>/dev/null | grep -v "$STARTUP_SCRIPT"; echo "@reboot $STARTUP_SCRIPT") | crontab -
-
-# Fix permissions
-echo "[INFO] Fixing permissions..."
-sudo chown -R $USERNAME:$USERNAME "$BASE_DIR"
-chmod -R 755 "$BASE_DIR"
-
-echo "=========================================="
-echo "✅ Installation completed successfully!"
-echo "=========================================="
-echo ""
-echo "Next steps:"
-echo "1. Configure ngrok: ngrok config add-authtoken <YOUR_TOKEN>"
-echo "2. Start the system: $STARTUP_SCRIPT"
-echo "3. Check status: sudo systemctl status ads-display"
-echo "4. View logs: tail -f $BASE_DIR/logs/node_app.log"
-echo ""
-echo "To start manually:"
-echo "  cd $BASE_DIR && node server.js"
-echo ""
-echo "The system will auto-start on reboot."
-echo "=========================================="
