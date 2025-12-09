@@ -188,9 +188,9 @@ force_reload_playlist() {
     fi
 }
 
-# OPTIMIZED MPV startup - NO LAG
+# OPTIMIZED MPV startup - NO LAG with normal aspect ratio
 start_mpv() {
-    echo "Starting MPV playback..."
+    echo "Starting MPV playback with normal aspect ratio..."
     
     # Check if MPV is installed
     if ! command -v mpv &> /dev/null; then
@@ -224,10 +224,10 @@ start_mpv() {
         echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
     fi
     
-    echo "Starting MPV with optimized configuration..."
+    echo "Starting MPV with optimized configuration and normal aspect ratio..."
     
-    # CRITICAL: Use the working MPV configuration from your first script
-    # This is what makes videos play smoothly
+    # CRITICAL: MPV configuration with NORMAL ASPECT RATIO
+    # Key changes: Removed --vo=xv, added --video-aspect=16:9 or auto
     mpv --fs \
         --shuffle \
         --loop-playlist=inf \
@@ -238,7 +238,10 @@ start_mpv() {
         --keep-open=yes \
         --no-resume-playback \
         --hwdec=auto \
-        --vo=xv \
+        --video-aspect=16:9 \
+        --video-aspect-method=stretch \
+        --video-unscaled=no \
+        --video-zoom=0 \
         --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
     
     local mpv_pid=$!
@@ -264,7 +267,7 @@ start_mpv() {
         ((mpv_attempts++))
     done
     
-    echo "MPV playback started successfully"
+    echo "MPV playback started successfully with normal 16:9 aspect ratio"
     return 0
 }
 
@@ -387,6 +390,7 @@ main() {
     echo "Playlist monitoring: ACTIVE"
     echo "Periodic refresh: EVERY 5 MINUTES"
     echo "Video directory: $VIDEO_DIR"
+    echo "Aspect ratio: NORMAL (16:9)"
     echo "=========================================="
     
     # Keep script running and monitor MPV process
