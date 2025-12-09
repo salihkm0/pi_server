@@ -3,7 +3,6 @@
 # ADS Display Startup Script
 # Video playback without WiFi and black screen options
 # Compatible with both Raspberry Pi Desktop and Lite versions
-# Optimized for 16:9 aspect ratio displays (ZEB-V16HD LED Monitor)
 
 # Configuration - Dynamic paths based on Desktop availability
 USERNAME=$(whoami)
@@ -21,12 +20,6 @@ PLAYLIST="$VIDEO_DIR/playlist.txt"
 MPV_SOCKET="/tmp/mpv-socket"
 LOG_FILE="$BASE_DIR/logs/ads_display.log"
 
-# Display Configuration - Based on ZEB-V16HD LED Monitor
-ASPECT_RATIO="16:9"
-DISPLAY_RESOLUTION="1366x768"  # Common for 16:9 monitors, adjust as needed
-MONITOR_MODEL="ZEB-V16HD LED"
-DISPLAY_NAME="ZEBSTER LED Monitor"
-
 # Ensure directories exist
 mkdir -p "$BASE_DIR/logs"
 mkdir -p "$VIDEO_DIR"
@@ -38,9 +31,6 @@ echo "=========================================="
 echo "ADS Display Startup Script"
 echo "User: $USERNAME"
 echo "Base Directory: $BASE_DIR"
-echo "Monitor Model: $MONITOR_MODEL"
-echo "Aspect Ratio: $ASPECT_RATIO"
-echo "Display Resolution: $DISPLAY_RESOLUTION"
 echo "Started at: $(date)"
 echo "=========================================="
 
@@ -49,58 +39,6 @@ export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 
 # Set DISPLAY for GUI applications like MPV
 export DISPLAY=:0
-
-# Function to set optimal display settings for 16:9 monitor
-configure_display() {
-    echo "Configuring display for $MONITOR_MODEL ($ASPECT_RATIO)..."
-    
-    # Try to detect actual resolution
-    if command -v xrandr &> /dev/null && is_xserver_running; then
-        echo "Current display configuration:"
-        xrandr 2>/dev/null || echo "xrandr not available"
-        
-        # Try to set optimal mode
-        local current_res=$(xrandr --current 2>/dev/null | grep '*' | awk '{print $1}' || echo "")
-        if [[ -n "$current_res" ]]; then
-            echo "Current resolution: $current_res"
-            DISPLAY_RESOLUTION="$current_res"
-        else
-            echo "Setting preferred resolution for 16:9..."
-            
-            # Try to set 16:9 resolution
-            local available_modes=$(xrandr 2>/dev/null | grep -E "^\s+[0-9]+x[0-9]+" | awk '{print $1}' | sort -u)
-            local preferred_res=""
-            
-            # Look for common 16:9 resolutions
-            for res in "1920x1080" "1366x768" "1280x720" "1600x900"; do
-                if echo "$available_modes" | grep -q "^$res$"; then
-                    preferred_res="$res"
-                    break
-                fi
-            done
-            
-            if [[ -n "$preferred_res" ]]; then
-                echo "Setting resolution to $preferred_res (16:9)"
-                xrandr --output $(xrandr --current 2>/dev/null | grep " connected" | awk '{print $1}' | head -1) \
-                       --mode "$preferred_res" 2>/dev/null
-                DISPLAY_RESOLUTION="$preferred_res"
-            fi
-        fi
-        
-        # Set display properties for better video playback
-        xset s off 2>/dev/null || true
-        xset -dpms 2>/dev/null || true
-        xset s noblank 2>/dev/null || true
-        
-        # Disable screen saver and power management
-        xset q 2>/dev/null | grep -q "DPMS is Enabled" && xset -dpms
-        xset q 2>/dev/null | grep -q "timeout:" && xset s 0
-        
-        echo "Display configured for $ASPECT_RATIO ($DISPLAY_RESOLUTION)"
-    else
-        echo "Display configuration not available"
-    fi
-}
 
 # Function to check if we're on Raspberry Pi Lite
 is_lite_version() {
@@ -135,7 +73,6 @@ start_xserver() {
         # Check if X server is already running
         if is_xserver_running; then
             echo "X server is already running"
-            configure_display
             return 0
         fi
 
@@ -164,8 +101,11 @@ start_xserver() {
             if is_xserver_running; then
                 echo "X server is ready (attempt $attempt)"
 
-                # Configure display for 16:9 monitor
-                configure_display
+                # Set some basic X properties
+                xset s off 2>/dev/null || true
+                xset -dpms 2>/dev/null || true
+                xset s noblank 2>/dev/null || true
+
                 return 0
             fi
 
@@ -248,9 +188,9 @@ force_reload_playlist() {
     fi
 }
 
-# OPTIMIZED MPV startup - Optimized for 16:9 displays
+# OPTIMIZED MPV startup - NO LAG
 start_mpv() {
-    echo "Starting MPV playback for $MONITOR_MODEL ($ASPECT_RATIO)..."
+    echo "Starting MPV playback..."
     
     # Check if MPV is installed
     if ! command -v mpv &> /dev/null; then
@@ -268,9 +208,6 @@ start_mpv() {
         fi
     fi
     
-    # Configure display for optimal 16:9 playback
-    configure_display
-    
     # Additional wait for X server stability
     sleep 2
     
@@ -287,10 +224,10 @@ start_mpv() {
         echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
     fi
     
-    echo "Starting MPV with optimized configuration for 16:9 display..."
+    echo "Starting MPV with optimized configuration..."
     
-    # CRITICAL: Optimized MPV configuration for 16:9 displays
-    # This configuration ensures proper aspect ratio and fullscreen scaling
+    # CRITICAL: Use the working MPV configuration from your first script
+    # This is what makes videos play smoothly
     mpv --fs \
         --shuffle \
         --loop-playlist=inf \
@@ -302,14 +239,6 @@ start_mpv() {
         --no-resume-playback \
         --hwdec=auto \
         --vo=xv \
-        --video-sync=display-resample \
-        --interpolation=yes \
-        --video-latency-hacks=yes \
-        --cache=yes \
-        --cache-secs=60 \
-        --demuxer-max-bytes=150M \
-        --demuxer-max-back-bytes=75M \
-        --vf=scale=w=-2:h=720:flags=lanczos \
         --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
     
     local mpv_pid=$!
@@ -335,7 +264,7 @@ start_mpv() {
         ((mpv_attempts++))
     done
     
-    echo "MPV playback started successfully for $ASPECT_RATIO display"
+    echo "MPV playback started successfully"
     return 0
 }
 
@@ -419,29 +348,9 @@ start_periodic_playlist_refresh() {
     done &
 }
 
-# Function to create sample video for aspect ratio testing
-create_aspect_ratio_test_video() {
-    echo "Creating aspect ratio test video..."
-    local test_video="$VIDEO_DIR/aspect_ratio_test.mp4"
-    
-    if [[ ! -f "$test_video" ]]; then
-        echo "Creating test video to verify 16:9 aspect ratio..."
-        
-        # Create a simple test pattern using FFmpeg if available
-        if command -v ffmpeg &> /dev/null; then
-            ffmpeg -f lavfi -i "color=c=blue:s=${DISPLAY_RESOLUTION}:d=5" \
-                   -vf "drawtext=text='16:9 Display Test':fontcolor=white:fontsize=24:x=(w-text_w)/2:y=(h-text_h)/2" \
-                   -c:v libx264 "$test_video" 2>/dev/null && \
-            echo "Test video created: $test_video"
-        else
-            echo "FFmpeg not available, skipping test video creation"
-        fi
-    fi
-}
-
 # Main startup sequence
 main() {
-    echo "Starting ADS Display System for $MONITOR_MODEL..."
+    echo "Starting ADS Display System..."
     
     # Start X server if needed (for Lite version)
     if is_lite_version; then
@@ -451,14 +360,8 @@ main() {
     # Wait a moment for system to stabilize
     sleep 3
     
-    # Configure display for 16:9 aspect ratio
-    configure_display
-    
-    # Create test video for aspect ratio verification
-    create_aspect_ratio_test_video
-    
     # Initial playlist creation
-    echo "Setting up video playback for $ASPECT_RATIO display..."
+    echo "Setting up video playback..."
     update_playlist
     
     # Start MPV playback (only if X server is available)
@@ -479,9 +382,6 @@ main() {
     echo "=========================================="
     echo "ADS Display System Started Successfully"
     echo "User: $USERNAME"
-    echo "Monitor Model: $MONITOR_MODEL"
-    echo "Aspect Ratio: $ASPECT_RATIO"
-    echo "Display Resolution: $DISPLAY_RESOLUTION"
     echo "Base Directory: $BASE_DIR"
     echo "Time: $(date)"
     echo "Playlist monitoring: ACTIVE"
@@ -505,8 +405,6 @@ main() {
 # Error handling
 handle_error() {
     echo "Error occurred in ADS Display startup script!"
-    echo "Monitor Model: $MONITOR_MODEL"
-    echo "Aspect Ratio: $ASPECT_RATIO"
     echo "Check the log file for more details: $LOG_FILE"
     
     # Try to restart main function after a delay
