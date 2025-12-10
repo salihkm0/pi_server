@@ -228,18 +228,19 @@ start_mpv() {
     
     # CRITICAL: Use the working MPV configuration from your first script
     # This is what makes videos play smoothly
-    mpv --fs \
-        --shuffle \
-        --loop-playlist=inf \
-        --osd-level=0 \
-        --no-terminal \
-        --input-ipc-server="$MPV_SOCKET" \
-        --playlist="$PLAYLIST" \
-        --keep-open=yes \
-        --no-resume-playback \
-        --hwdec=auto \
-        --vo=xv \
-        --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
+mpv --fs \
+    --shuffle \
+    --loop-playlist=inf \
+    --no-terminal \
+    --osd-level=0 \
+    --input-ipc-server="$MPV_SOCKET" \
+    --playlist="$PLAYLIST" \
+    --keep-open=yes \
+    --no-resume-playback \
+    --hwdec=auto \
+    --vo=xv \
+    --no-keepaspect \
+    --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
     
     local mpv_pid=$!
     
