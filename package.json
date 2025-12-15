@@ -1,6 +1,6 @@
 {
   "name": "raspberrypi-ads-display",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "type": "module",
   "description": "Automated ADS Display System for Raspberry Pi with Central Server WiFi Control",
   "main": "server.js",
