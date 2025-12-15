@@ -161,9 +161,11 @@ start_node_app() {
     pkill -f "node.*$NODE_APP_DIR" || true
     sleep 1
     
+    echo "Checking package.json for available scripts..."
+    
     # Check if running in development mode
-    if grep -q '"dev"' "$NODE_APP_DIR/package.json" || grep -q '"start:dev"' "$NODE_APP_DIR/package.json"; then
-        echo "Starting Node.js app in development mode..."
+    if grep -q '"dev"' "$NODE_APP_DIR/package.json"; then
+        echo "Starting Node.js app in development mode (npm run dev)..."
         
         # Change to app directory and start with sudo
         cd "$NODE_APP_DIR"
@@ -178,10 +180,9 @@ start_node_app() {
         echo "Starting: sudo npm run dev"
         sudo npm run dev > "$NODE_LOG" 2>&1 &
         local node_pid=$!
-        echo "Node.js application started with PID: $node_pid"
         
     elif grep -q '"start"' "$NODE_APP_DIR/package.json"; then
-        echo "Starting Node.js app in production mode..."
+        echo "Starting Node.js app in production mode (npm start)..."
         
         cd "$NODE_APP_DIR"
         
@@ -193,7 +194,7 @@ start_node_app() {
         echo "Starting: sudo npm start"
         sudo npm start > "$NODE_LOG" 2>&1 &
         local node_pid=$!
-        echo "Node.js application started with PID: $node_pid"
+        
     else
         echo "Warning: No start or dev script found in package.json"
         echo "Attempting to start with: sudo node server.js or sudo node app.js"
@@ -225,7 +226,7 @@ start_node_app() {
     
     # Check if Node.js process is running
     if ps -p $node_pid > /dev/null 2>&1; then
-        echo "Node.js application started successfully"
+        echo "Node.js application started successfully (PID: $node_pid)"
         return 0
     else
         echo "Warning: Node.js process may have failed to start"
@@ -292,7 +293,7 @@ force_reload_playlist() {
     fi
 }
 
-# OPTIMIZED MPV startup - NO LAG
+# OPTIMIZED MPV startup - NO LAG - UPDATED WITH YOUR EXACT CONFIGURATION
 start_mpv() {
     echo "Starting MPV playback..."
     
@@ -330,19 +331,19 @@ start_mpv() {
     
     echo "Starting MPV with optimized configuration..."
     
-    # CRITICAL: Use the working MPV configuration from your first script
-    # This is what makes videos play smoothly
+    # YOUR EXACT MPV CONFIGURATION - UPDATED WITH --no-keepaspect
     mpv --fs \
         --shuffle \
         --loop-playlist=inf \
-        --osd-level=0 \
         --no-terminal \
+        --osd-level=0 \
         --input-ipc-server="$MPV_SOCKET" \
         --playlist="$PLAYLIST" \
         --keep-open=yes \
         --no-resume-playback \
         --hwdec=auto \
         --vo=xv \
+        --no-keepaspect \
         --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
     
     local mpv_pid=$!
