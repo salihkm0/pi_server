@@ -19,6 +19,8 @@ VIDEO_DIR="$BASE_DIR/ads-videos"
 PLAYLIST="$VIDEO_DIR/playlist.txt"
 MPV_SOCKET="/tmp/mpv-socket"
 LOG_FILE="$BASE_DIR/logs/ads_display.log"
+NODE_APP_DIR="$BASE_DIR"  # Assuming Node.js app is in pi_server directory
+NODE_LOG="$BASE_DIR/logs/node_app.log"
 
 # Ensure directories exist
 mkdir -p "$BASE_DIR/logs"
@@ -130,6 +132,108 @@ start_xserver() {
     return 0
 }
 
+# Function to start Node.js application with sudo
+start_node_app() {
+    echo "Starting Node.js application..."
+    
+    # Check if Node.js is installed
+    if ! command -v node &> /dev/null; then
+        echo "Warning: Node.js is not installed"
+        echo "Install Node.js with: curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs"
+        return 1
+    fi
+    
+    # Check if npm is installed
+    if ! command -v npm &> /dev/null; then
+        echo "Warning: npm is not installed"
+        echo "npm usually comes with Node.js installation"
+        return 1
+    fi
+    
+    # Check if package.json exists
+    if [ ! -f "$NODE_APP_DIR/package.json" ]; then
+        echo "Warning: package.json not found in $NODE_APP_DIR"
+        echo "Node.js application cannot start without package.json"
+        return 1
+    fi
+    
+    # Kill any existing Node.js processes from this app
+    pkill -f "node.*$NODE_APP_DIR" || true
+    sleep 1
+    
+    # Check if running in development mode
+    if grep -q '"dev"' "$NODE_APP_DIR/package.json" || grep -q '"start:dev"' "$NODE_APP_DIR/package.json"; then
+        echo "Starting Node.js app in development mode..."
+        
+        # Change to app directory and start with sudo
+        cd "$NODE_APP_DIR"
+        
+        # Check if node_modules exists, if not install dependencies
+        if [ ! -d "node_modules" ]; then
+            echo "Installing Node.js dependencies..."
+            sudo npm install 2>&1 | tee -a "$NODE_LOG"
+        fi
+        
+        # Start Node.js app with sudo npm run dev
+        echo "Starting: sudo npm run dev"
+        sudo npm run dev > "$NODE_LOG" 2>&1 &
+        local node_pid=$!
+        echo "Node.js application started with PID: $node_pid"
+        
+    elif grep -q '"start"' "$NODE_APP_DIR/package.json"; then
+        echo "Starting Node.js app in production mode..."
+        
+        cd "$NODE_APP_DIR"
+        
+        if [ ! -d "node_modules" ]; then
+            echo "Installing Node.js dependencies..."
+            sudo npm install --production 2>&1 | tee -a "$NODE_LOG"
+        fi
+        
+        echo "Starting: sudo npm start"
+        sudo npm start > "$NODE_LOG" 2>&1 &
+        local node_pid=$!
+        echo "Node.js application started with PID: $node_pid"
+    else
+        echo "Warning: No start or dev script found in package.json"
+        echo "Attempting to start with: sudo node server.js or sudo node app.js"
+        
+        cd "$NODE_APP_DIR"
+        
+        # Try common entry points
+        if [ -f "server.js" ]; then
+            sudo node server.js > "$NODE_LOG" 2>&1 &
+            local node_pid=$!
+            echo "Node.js application started with PID: $node_pid (server.js)"
+        elif [ -f "app.js" ]; then
+            sudo node app.js > "$NODE_LOG" 2>&1 &
+            local node_pid=$!
+            echo "Node.js application started with PID: $node_pid (app.js)"
+        elif [ -f "index.js" ]; then
+            sudo node index.js > "$NODE_LOG" 2>&1 &
+            local node_pid=$!
+            echo "Node.js application started with PID: $node_pid (index.js)"
+        else
+            echo "Error: No recognizable Node.js entry point found"
+            echo "Looking for: server.js, app.js, index.js, or scripts in package.json"
+            return 1
+        fi
+    fi
+    
+    # Wait a moment for Node.js to start
+    sleep 3
+    
+    # Check if Node.js process is running
+    if ps -p $node_pid > /dev/null 2>&1; then
+        echo "Node.js application started successfully"
+        return 0
+    else
+        echo "Warning: Node.js process may have failed to start"
+        echo "Check the Node.js log: $NODE_LOG"
+        return 1
+    fi
+}
+
 # Function to update the playlist
 update_playlist() {
     echo "Updating playlist..."
@@ -228,19 +332,18 @@ start_mpv() {
     
     # CRITICAL: Use the working MPV configuration from your first script
     # This is what makes videos play smoothly
-mpv --fs \
-    --shuffle \
-    --loop-playlist=inf \
-    --no-terminal \
-    --osd-level=0 \
-    --input-ipc-server="$MPV_SOCKET" \
-    --playlist="$PLAYLIST" \
-    --keep-open=yes \
-    --no-resume-playback \
-    --hwdec=auto \
-    --vo=xv \
-    --no-keepaspect \
-    --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
+    mpv --fs \
+        --shuffle \
+        --loop-playlist=inf \
+        --osd-level=0 \
+        --no-terminal \
+        --input-ipc-server="$MPV_SOCKET" \
+        --playlist="$PLAYLIST" \
+        --keep-open=yes \
+        --no-resume-playback \
+        --hwdec=auto \
+        --vo=xv \
+        --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
     
     local mpv_pid=$!
     
@@ -349,6 +452,26 @@ start_periodic_playlist_refresh() {
     done &
 }
 
+# Function to monitor and restart Node.js app if needed
+monitor_node_app() {
+    echo "Starting Node.js application monitor..."
+    
+    while true; do
+        sleep 30
+        
+        # Check if Node.js app is running
+        local node_running=false
+        if pgrep -f "node.*$NODE_APP_DIR" > /dev/null; then
+            node_running=true
+        fi
+        
+        if [ "$node_running" = false ]; then
+            echo "Node.js application not running. Restarting..."
+            start_node_app
+        fi
+    done &
+}
+
 # Main startup sequence
 main() {
     echo "Starting ADS Display System..."
@@ -361,6 +484,10 @@ main() {
     # Wait a moment for system to stabilize
     sleep 3
     
+    # Start Node.js application first (it may provide web interface or API)
+    echo "Starting Node.js application..."
+    start_node_app
+    
     # Initial playlist creation
     echo "Setting up video playback..."
     update_playlist
@@ -371,7 +498,7 @@ main() {
     else
         echo "X server not available - video playback disabled"
         echo "Check X server configuration and restart"
-        return 1
+        # Don't return here, let Node.js app continue running
     fi
     
     # Monitor directory for changes (run in background)
@@ -380,21 +507,43 @@ main() {
     # Start periodic playlist refresh (run in background)
     start_periodic_playlist_refresh &
     
+    # Start Node.js application monitor (run in background)
+    monitor_node_app &
+    
     echo "=========================================="
     echo "ADS Display System Started Successfully"
     echo "User: $USERNAME"
     echo "Base Directory: $BASE_DIR"
     echo "Time: $(date)"
+    echo "Node.js Application: RUNNING"
     echo "Playlist monitoring: ACTIVE"
     echo "Periodic refresh: EVERY 5 MINUTES"
     echo "Video directory: $VIDEO_DIR"
     echo "=========================================="
+    echo "Node.js log: $NODE_LOG"
+    echo "System log: $LOG_FILE"
+    echo "=========================================="
     
     # Keep script running and monitor MPV process
     while true; do
-        # Check if MPV is still running
-        if ! pgrep -f mpv > /dev/null; then
-            echo "Warning: MPV stopped. Restarting..."
+        # Check if MPV is still running (if it was started)
+        if pgrep -f mpv > /dev/null 2>&1; then
+            # MPV is running, check if it's still responsive
+            if [ -S "$MPV_SOCKET" ]; then
+                # Everything is fine
+                :
+            else
+                echo "Warning: MPV socket not found but process exists. Checking..."
+                # Wait a bit and check again
+                sleep 5
+                if [ ! -S "$MPV_SOCKET" ]; then
+                    echo "MPV may be hung. Restarting..."
+                    start_mpv
+                fi
+            fi
+        elif is_xserver_running; then
+            # X server is running but MPV is not, restart it
+            echo "MPV not running but X server is available. Restarting MPV..."
             start_mpv
         fi
         
