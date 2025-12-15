@@ -14,13 +14,14 @@ const execAsync = promisify(exec);
 // Local WiFi storage
 const LOCAL_WIFI_PATH = path.join(__dirname, '..', 'config', '.local_wifi.json');
 const ENCRYPTION_KEY_PATH = path.join(__dirname, '..', 'config', '.wifi_key');
+const WIFI_CONNECTION_HISTORY_PATH = path.join(__dirname, '..', 'config', '.wifi_history.json');
 
 class WifiManager {
   constructor() {
     this.isMonitoring = false;
     this.monitorInterval = null;
     this.connectionAttempts = 0;
-    this.maxConnectionAttempts = 3;
+    this.maxConnectionAttempts = 5; // Increased attempts
     this.currentWifiSsid = null;
     this.serverWifiConfigured = false;
     this.lastServerCheck = null;
@@ -28,38 +29,110 @@ class WifiManager {
     this.encryptionKey = this.getOrCreateEncryptionKey();
     this.isLinux = process.platform === 'linux';
     this.isMacOS = process.platform === 'darwin';
-    this.useSudo = false;
+    this.useSudo = true; // Always use sudo for reliability
     this.currentUser = process.env.USER || 'pi';
     this.lastNetworkScan = null;
     this.scanCacheDuration = 30000;
     this.scanCache = [];
-    
-    // Check if we need sudo
-    this.detectPermissions();
+    this.fallbackWifiSsid = null;
+    this.fallbackWifiPassword = null;
+    this.connectionHistory = this.loadConnectionHistory();
     
     // Load local WiFi config (only from server)
     this.localWifiConfig = this.loadLocalWifiConfig();
+    
+    // Load fallback from history
+    this.loadFallbackFromHistory();
   }
 
-  // Detect if we need sudo permissions
-  async detectPermissions() {
+  // Load connection history
+  loadConnectionHistory() {
     try {
-      // Try to run a simple nmcli command without sudo
-      await execAsync('nmcli -v');
-      logInfo('✅ Running with normal user permissions');
-      this.useSudo = false;
-    } catch (error) {
-      if (error.message.includes('permission') || error.message.includes('Not authorized')) {
-        logWarning('⚠️ Need sudo permissions for WiFi control');
-        this.useSudo = true;
+      if (fs.existsSync(WIFI_CONNECTION_HISTORY_PATH)) {
+        const data = JSON.parse(fs.readFileSync(WIFI_CONNECTION_HISTORY_PATH, 'utf8'));
+        return data;
       }
+    } catch (error) {
+      logError('Error loading connection history:', error);
+    }
+    return { connections: [], lastSuccessful: null };
+  }
+
+  // Save connection history
+  saveConnectionHistory() {
+    try {
+      const configDir = path.dirname(WIFI_CONNECTION_HISTORY_PATH);
+      if (!fs.existsSync(configDir)) {
+        fs.mkdirSync(configDir, { recursive: true });
+      }
+      
+      fs.writeFileSync(WIFI_CONNECTION_HISTORY_PATH, JSON.stringify(this.connectionHistory, null, 2), {
+        mode: 0o600
+      });
+    } catch (error) {
+      logError('Error saving connection history:', error);
     }
   }
 
-  // Execute command with appropriate permissions
-  async executeCommand(command, timeout = 10000) {
+  // Record successful connection
+  recordSuccessfulConnection(ssid, source) {
     try {
-      const cmd = this.useSudo ? `sudo ${command}` : command;
+      const connection = {
+        ssid: ssid,
+        source: source,
+        timestamp: new Date().toISOString(),
+        successful: true
+      };
+      
+      // Add to history
+      this.connectionHistory.connections.unshift(connection);
+      
+      // Keep only last 10 connections
+      if (this.connectionHistory.connections.length > 10) {
+        this.connectionHistory.connections = this.connectionHistory.connections.slice(0, 10);
+      }
+      
+      // Update last successful
+      this.connectionHistory.lastSuccessful = {
+        ssid: ssid,
+        source: source,
+        timestamp: new Date().toISOString()
+      };
+      
+      this.saveConnectionHistory();
+      logInfo(`📝 Recorded successful connection to: ${ssid}`);
+    } catch (error) {
+      logError('Error recording connection:', error);
+    }
+  }
+
+  // Load fallback WiFi from history
+  loadFallbackFromHistory() {
+    try {
+      if (this.connectionHistory.lastSuccessful) {
+        const lastSsid = this.connectionHistory.lastSuccessful.ssid;
+        
+        // Don't use server WiFi as fallback (we're trying to connect to it)
+        if (lastSsid !== this.localWifiConfig.ssid) {
+          this.fallbackWifiSsid = lastSsid;
+          logInfo(`📋 Loaded fallback WiFi from history: ${lastSsid}`);
+          
+          // Try to find password in local config
+          const localConfig = this.loadLocalWifiConfig();
+          if (localConfig.ssid === lastSsid) {
+            this.fallbackWifiPassword = localConfig.password;
+          }
+        }
+      }
+    } catch (error) {
+      logError('Error loading fallback from history:', error);
+    }
+  }
+
+  // Execute command with sudo (always use sudo for reliability)
+  async executeCommand(command, timeout = 15000) {
+    try {
+      const cmd = `sudo ${command}`;
       // Mask passwords in logs
       const maskedCmd = cmd.replace(/password ".*?"/g, 'password "********"');
       logInfo(`🔧 Executing: ${maskedCmd}`);
@@ -246,70 +319,34 @@ class WifiManager {
       logInfo('📡 Scanning for WiFi networks...');
       
       if (this.isLinux) {
-        // First check if WiFi is enabled
+        // Ensure WiFi is enabled
         try {
-          const { stdout: radioStatus } = await this.executeCommand('nmcli radio wifi');
-          if (radioStatus.trim() !== 'enabled') {
-            logInfo('📻 WiFi radio is off, turning it on...');
-            await this.executeCommand('nmcli radio wifi on');
-            await new Promise(resolve => setTimeout(resolve, 3000));
-          }
+          await this.executeCommand('nmcli radio wifi on');
+          await new Promise(resolve => setTimeout(resolve, 2000));
         } catch (error) {
-          logWarning(`⚠️ Could not check WiFi radio status: ${error.message}`);
+          logWarning(`⚠️ Could not enable WiFi radio: ${error.message}`);
         }
         
-        // Scan for networks - use a more comprehensive command
+        // Scan for networks
         try {
           await this.executeCommand('nmcli device wifi rescan', 10000);
-          await new Promise(resolve => setTimeout(resolve, 5000));
+          await new Promise(resolve => setTimeout(resolve, 3000));
         } catch (error) {
           logWarning(`⚠️ Rescan failed: ${error.message}`);
         }
         
-        // Get list of networks using the same command you used manually
-        const { stdout } = await this.executeCommand('nmcli -t -f SSID dev wifi');
+        // Get list of networks
+        const { stdout } = await this.executeCommand('nmcli -t -f SSID,SIGNAL dev wifi');
         const lines = stdout.trim().split('\n').filter(line => line);
         
         const networks = [];
         for (const line of lines) {
-          const ssid = line.trim();
-          if (ssid && ssid !== '--' && ssid !== 'SSID') {
-            // Get signal strength for this network
-            let signal = 0;
-            try {
-              const { stdout: signalStdout } = await this.executeCommand(`nmcli -t -f SSID,SIGNAL dev wifi | grep "${ssid}:" | cut -d: -f2`);
-              signal = parseInt(signalStdout.trim()) || 0;
-            } catch (error) {
-              // If we can't get signal, continue anyway
-            }
-            
+          const [ssid, signalStr] = line.split(':');
+          if (ssid && ssid !== '--') {
             networks.push({
               ssid: ssid,
-              signal: signal,
-              security: 'WPA2' // Default assumption
+              signal: parseInt(signalStr) || 0
             });
-          }
-        }
-        
-        // Alternative: Try to get more detailed info
-        if (networks.length === 0) {
-          logInfo('Trying alternative scan method...');
-          try {
-            const { stdout: detailedOutput } = await this.executeCommand('nmcli -f SSID,SIGNAL,SECURITY dev wifi');
-            const detailedLines = detailedOutput.trim().split('\n').slice(1); // Skip header
-            
-            for (const line of detailedLines) {
-              const parts = line.trim().split(/\s{2,}/);
-              if (parts.length >= 2 && parts[0] && parts[0] !== '--') {
-                networks.push({
-                  ssid: parts[0],
-                  signal: parseInt(parts[1]) || 0,
-                  security: parts[2] || 'unknown'
-                });
-              }
-            }
-          } catch (error) {
-            logWarning(`Alternative scan failed: ${error.message}`);
           }
         }
         
@@ -321,7 +358,7 @@ class WifiManager {
         
         // Debug: List all found networks
         if (networks.length > 0) {
-          logInfo('📶 Found networks:');
+          logInfo('📶 Available networks:');
           networks.forEach(network => {
             logInfo(`  - ${network.ssid} (signal: ${network.signal}%)`);
           });
@@ -340,255 +377,228 @@ class WifiManager {
   // Enhanced check if network is available
   async isNetworkAvailable(ssid) {
     try {
-      // First try the regular scan
       const networks = await this.scanNetworks();
-      if (networks.some(network => network.ssid === ssid)) {
-        return true;
+      const found = networks.some(network => network.ssid === ssid);
+      
+      if (found) {
+        logInfo(`✅ Network "${ssid}" is available`);
+      } else {
+        logInfo(`❌ Network "${ssid}" not found in scan`);
       }
       
-      // If not found, try a direct nmcli query for this specific SSID
-      logInfo(`🔍 Doing targeted scan for SSID: ${ssid}`);
-      
-      // Try to get info about this specific network
-      try {
-        const { stdout } = await this.executeCommand(`nmcli -t -f SSID dev wifi list | grep "${ssid}"`);
-        if (stdout.trim().includes(ssid)) {
-          return true;
-        }
-      } catch (error) {
-        // Network not found in list
-      }
-      
-      // Try another method: check all available BSSIDs
-      try {
-        const { stdout } = await this.executeCommand('nmcli -t -f BSSID,SSID dev wifi');
-        const lines = stdout.trim().split('\n');
-        for (const line of lines) {
-          const [bssid, networkSsid] = line.split(':');
-          if (networkSsid === ssid) {
-            logInfo(`✅ Found network "${ssid}" with BSSID: ${bssid}`);
-            return true;
-          }
-        }
-      } catch (error) {
-        logWarning(`Could not scan BSSIDs: ${error.message}`);
-      }
-      
-      return false;
+      return found;
     } catch (error) {
       logError(`Error checking network availability for ${ssid}:`, error);
       return false;
     }
   }
 
-  // Fetch and apply server WiFi with improved scanning
-  async fetchAndApplyServerWifi() {
-    try {
-      logInfo('🔄 Fetching and applying server WiFi configuration...');
-      
-      // Step 1: Fetch from server
-      const serverConfig = await this.fetchWifiFromServer();
-      
-      if (!serverConfig.success || !serverConfig.hasConfig) {
-        logWarning('📡 No server WiFi configuration available');
-        
-        const currentWifi = await this.getCurrentWifi();
-        if (currentWifi.connected) {
-          logInfo(`⚠️ No server WiFi config, staying on current WiFi: ${currentWifi.ssid}`);
-        }
-        
-        return {
-          success: false,
-          error: 'No WiFi configuration found on server',
-          hasConfig: false
-        };
-      }
-      
-      logInfo(`📡 Server WiFi config received: ${serverConfig.ssid}`);
-      
-      // Step 2: Save server config to file FIRST
-      const saved = this.saveWifiConfigToFile(
-        serverConfig.ssid,
-        serverConfig.password,
-        'server'
-      );
-      
-      if (!saved) {
-        logError('❌ Failed to save server WiFi config to file');
-        return {
-          success: false,
-          error: 'Failed to save WiFi configuration',
-          hasConfig: true
-        };
-      }
-      
-      logSuccess(`✅ Server WiFi config saved to file: ${serverConfig.ssid}`);
-      
-      // Step 3: Get current WiFi status
-      const currentWifi = await this.getCurrentWifi();
-      const hasInternet = await this.testInternet();
-      
-      // If already connected to the right WiFi, just verify
-      if (currentWifi.connected && currentWifi.ssid === serverConfig.ssid) {
-        logInfo(`✅ Already connected to server WiFi: ${serverConfig.ssid}`);
-        
-        if (hasInternet) {
-          logSuccess(`✅ Internet is working on server WiFi`);
-          return {
-            success: true,
-            ssid: serverConfig.ssid,
-            source: 'server',
-            alreadyConnected: true,
-            internet: true
-          };
-        } else {
-          logWarning(`⚠️ Connected to server WiFi but no internet`);
-          // Will try to reconnect below
-        }
-      }
-      
-      // Step 4: Check if target network is available (with better scanning)
-      logInfo(`🔍 Checking if network "${serverConfig.ssid}" is available...`);
-      
-      // First, do a fresh scan
-      await this.scanNetworks(true); // Force refresh
-      
-      // Check using multiple methods
-      const isAvailable = await this.isNetworkAvailable(serverConfig.ssid);
-      
-      if (!isAvailable) {
-        logError(`❌ WiFi network "${serverConfig.ssid}" not found after deep scan`);
-        logInfo(`💡 Staying on current WiFi: ${currentWifi.ssid || 'None'}`);
-        
-        // List what networks ARE available
-        const availableNetworks = await this.scanNetworks();
-        if (availableNetworks.length > 0) {
-          logInfo(`📶 Available networks: ${availableNetworks.map(n => n.ssid).join(', ')}`);
-        }
-        
-        return {
-          success: false,
-          error: `WiFi network "${serverConfig.ssid}" not found`,
-          hasConfig: true,
-          stayingOnCurrent: true,
-          currentSsid: currentWifi.ssid,
-          availableNetworks: availableNetworks.map(n => n.ssid)
-        };
-      }
-      
-      logInfo(`✅ Target network found: ${serverConfig.ssid}`);
-      
-      // Step 5: If currently connected to a different WiFi, try to disconnect
-      if (currentWifi.connected && currentWifi.ssid !== serverConfig.ssid) {
-        logInfo(`Disconnecting from current WiFi: ${currentWifi.ssid}`);
-        const disconnectResult = await this.disconnectWifi();
-        
-        if (disconnectResult.success) {
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        } else {
-          logWarning(`⚠️ Could not disconnect from ${currentWifi.ssid}, will try to connect anyway`);
-        }
-      }
-      
-      // Step 6: Connect to server WiFi with retry logic
-      logInfo(`🔗 Attempting to connect to: ${serverConfig.ssid}`);
-      
-      let connectResult;
-      let retryCount = 0;
-      const maxRetries = 2;
-      
-      while (retryCount <= maxRetries) {
-        if (retryCount > 0) {
-          logInfo(`🔄 Retry ${retryCount}/${maxRetries} for ${serverConfig.ssid}`);
-          await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
-        }
-        
-        connectResult = await this.connectToWifiDirect(
-          serverConfig.ssid,
-          serverConfig.password,
-          `server${retryCount > 0 ? '-retry' + retryCount : ''}`
-        );
-        
-        if (connectResult.success) {
-          break;
-        }
-        
-        retryCount++;
-      }
-      
-      if (connectResult.success) {
-        logSuccess(`✅ Connected to server WiFi: ${serverConfig.ssid}`);
-        
-        // Verify internet after connection
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        const newInternetStatus = await this.testInternet();
-        
-        return {
-          success: true,
-          ssid: serverConfig.ssid,
-          source: 'server',
-          internet: newInternetStatus,
-          message: newInternetStatus ? 'Connected with internet' : 'Connected but no internet'
-        };
-      } else {
-        logError(`❌ Failed to connect to server WiFi after ${maxRetries + 1} attempts: ${connectResult.error}`);
-        
-        // If we disconnected but couldn't connect, try to go back to original
-        if (currentWifi.connected && currentWifi.ssid !== serverConfig.ssid) {
-          logWarning(`⚠️ Disconnected from ${currentWifi.ssid} but couldn't connect to ${serverConfig.ssid}`);
-          // Note: We can't reconnect without password
-        }
-        
-        return {
-          success: false,
-          error: connectResult.error,
-          hasConfig: true
-        };
-      }
-    } catch (error) {
-      logError('❌ Error applying server WiFi:', error);
-      return {
-        success: false,
-        error: error.message
+  // Persistent attempt to connect to configured WiFi
+  async connectToConfiguredWifi() {
+    const config = this.loadLocalWifiConfig();
+    
+    if (!config.ssid || !config.password) {
+      logError('❌ No configured WiFi found in local file');
+      return { success: false, error: 'No configured WiFi' };
+    }
+    
+    logInfo(`🔗 Persistent attempt to connect to configured WiFi: ${config.ssid}`);
+    
+    // Check if network is available
+    const isAvailable = await this.isNetworkAvailable(config.ssid);
+    
+    if (!isAvailable) {
+      logWarning(`⚠️ Configured WiFi "${config.ssid}" not available`);
+      return { 
+        success: false, 
+        error: `Network "${config.ssid}" not available`,
+        retry: true // Indicate we should retry later
       };
     }
+    
+    // Try to connect
+    const result = await this.connectToWifiDirect(
+      config.ssid,
+      config.password,
+      'configured-retry'
+    );
+    
+    if (result.success) {
+      logSuccess(`✅ Connected to configured WiFi: ${config.ssid}`);
+      this.recordSuccessfulConnection(config.ssid, 'configured');
+      return result;
+    }
+    
+    return result;
   }
 
-  // Enhanced WiFi connection method
+  // Connect to fallback WiFi (last successful non-server WiFi)
+  async connectToFallbackWifi() {
+    if (!this.fallbackWifiSsid) {
+      logInfo('No fallback WiFi available');
+      return { success: false, error: 'No fallback WiFi' };
+    }
+    
+    // Don't fallback to server WiFi (we're trying to connect to it)
+    if (this.fallbackWifiSsid === this.localWifiConfig.ssid) {
+      logInfo('Fallback is same as configured WiFi, skipping');
+      return { success: false, error: 'Fallback same as target' };
+    }
+    
+    logInfo(`🔗 Connecting to fallback WiFi: ${this.fallbackWifiSsid}`);
+    
+    // We need password for fallback - if we don't have it, we can't connect
+    if (!this.fallbackWifiPassword) {
+      logWarning(`⚠️ No password for fallback WiFi: ${this.fallbackWifiSsid}`);
+      return { success: false, error: 'No password for fallback' };
+    }
+    
+    const result = await this.connectToWifiDirect(
+      this.fallbackWifiSsid,
+      this.fallbackWifiPassword,
+      'fallback'
+    );
+    
+    if (result.success) {
+      logSuccess(`✅ Connected to fallback WiFi: ${this.fallbackWifiSsid}`);
+      this.recordSuccessfulConnection(this.fallbackWifiSsid, 'fallback');
+    }
+    
+    return result;
+  }
+
+  // Main WiFi connection strategy
+  async executeWifiConnectionStrategy() {
+    logInfo('🚀 Executing WiFi connection strategy...');
+    
+    // Step 1: Get current status
+    const currentWifi = await this.getCurrentWifi();
+    const hasInternet = await this.testInternet();
+    
+    logInfo(`📊 Current: WiFi=${currentWifi.ssid || 'None'}, Internet=${hasInternet}`);
+    
+    // If already connected to configured WiFi with internet, we're good
+    if (currentWifi.connected && 
+        currentWifi.ssid === this.localWifiConfig.ssid && 
+        hasInternet) {
+      logInfo(`✅ Already connected to configured WiFi with internet: ${currentWifi.ssid}`);
+      this.recordSuccessfulConnection(currentWifi.ssid, 'current');
+      return { success: true, connectedTo: 'configured', ssid: currentWifi.ssid };
+    }
+    
+    // Step 2: Try to connect to configured WiFi
+    logInfo('🔄 Step 1: Trying configured WiFi...');
+    const configuredResult = await this.connectToConfiguredWifi();
+    
+    if (configuredResult.success) {
+      const internetAfter = await this.testInternet();
+      if (internetAfter) {
+        logSuccess(`✅ Connected to configured WiFi with internet: ${configuredResult.ssid}`);
+        return { success: true, connectedTo: 'configured', ssid: configuredResult.ssid };
+      } else {
+        logWarning(`⚠️ Connected to configured WiFi but no internet: ${configuredResult.ssid}`);
+      }
+    }
+    
+    // Step 3: If configured WiFi failed but we have internet from current WiFi, stay connected
+    if (currentWifi.connected && hasInternet) {
+      logInfo(`⚠️ Configured WiFi failed, staying on current WiFi with internet: ${currentWifi.ssid}`);
+      this.recordSuccessfulConnection(currentWifi.ssid, 'current-fallback');
+      return { success: true, connectedTo: 'current', ssid: currentWifi.ssid };
+    }
+    
+    // Step 4: Try fallback WiFi
+    logInfo('🔄 Step 2: Trying fallback WiFi...');
+    const fallbackResult = await this.connectToFallbackWifi();
+    
+    if (fallbackResult.success) {
+      const internetAfter = await this.testInternet();
+      if (internetAfter) {
+        logSuccess(`✅ Connected to fallback WiFi with internet: ${fallbackResult.ssid}`);
+        return { success: true, connectedTo: 'fallback', ssid: fallbackResult.ssid };
+      } else {
+        logWarning(`⚠️ Connected to fallback WiFi but no internet: ${fallbackResult.ssid}`);
+      }
+    }
+    
+    // Step 5: If nothing worked, try to reconnect to any available WiFi
+    logInfo('🔄 Step 3: Scanning for any available WiFi...');
+    const networks = await this.scanNetworks(true);
+    
+    if (networks.length > 0) {
+      // Try the strongest signal network (except configured one)
+      const availableNetworks = networks
+        .filter(n => n.ssid !== this.localWifiConfig.ssid)
+        .sort((a, b) => b.signal - a.signal);
+      
+      if (availableNetworks.length > 0) {
+        const strongestNetwork = availableNetworks[0];
+        logInfo(`📶 Strongest available network: ${strongestNetwork.ssid} (${strongestNetwork.signal}%)`);
+        
+        // We can't connect without password, but we log it
+        logInfo(`ℹ️ Would try ${strongestNetwork.ssid} but need password`);
+      }
+    }
+    
+    // Final fallback: Stay disconnected and keep retrying configured WiFi
+    logInfo('🔄 Will retry configured WiFi in next cycle');
+    return { 
+      success: false, 
+      error: 'All connection attempts failed',
+      retryConfigured: true 
+    };
+  }
+
+  // Enhanced WiFi connection method with multiple strategies
   async connectToWifiDirect(ssid, password, source = 'server') {
     try {
-      logInfo(`🔗 Direct connection to: ${ssid} (Source: ${source})`);
+      logInfo(`🔗 Connecting to: ${ssid} (Source: ${source})`);
       
       if (!ssid || !password) {
         throw new Error('SSID and password are required');
       }
 
-      let result;
+      // Try multiple connection methods
+      const methods = [
+        this.connectMethodDirect.bind(this, ssid, password),
+        this.connectMethodHidden.bind(this, ssid, password),
+        this.connectMethodProfile.bind(this, ssid, password)
+      ];
       
-      if (this.isLinux) {
-        result = await this.connectToWifiLinux(ssid, password);
-      } else if (this.isMacOS) {
-        result = await this.connectToWifiMacOS(ssid, password);
-      } else {
-        throw new Error(`Unsupported platform: ${process.platform}`);
+      for (let i = 0; i < methods.length; i++) {
+        try {
+          logInfo(`🔗 Method ${i + 1}/${methods.length} for ${ssid}`);
+          const result = await methods[i]();
+          
+          if (result.success) {
+            // Verify connection
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            const verifyWifi = await this.getCurrentWifiLinux();
+            
+            if (verifyWifi.ssid === ssid) {
+              this.currentWifiSsid = ssid;
+              this.connectionAttempts = 0;
+              
+              logSuccess(`✅ Connected to ${ssid} using method ${i + 1}`);
+              return {
+                success: true,
+                ssid: ssid,
+                source: source,
+                method: i + 1,
+                message: `Connected to ${ssid}`
+              };
+            } else {
+              logWarning(`⚠️ Method ${i + 1} verification failed. Current: ${verifyWifi.ssid || 'None'}`);
+            }
+          }
+        } catch (error) {
+          logWarning(`Method ${i + 1} failed: ${error.message}`);
+          continue;
+        }
       }
-
-      if (result.success) {
-        this.currentWifiSsid = ssid;
-        this.connectionAttempts = 0;
-        
-        logSuccess(`✅ Connected to ${ssid}`);
-        
-        return {
-          success: true,
-          ssid: ssid,
-          source: source,
-          message: `Connected to ${ssid}`
-        };
-      } else {
-        throw new Error(result.error);
-      }
-
+      
+      throw new Error('All connection methods failed');
+      
     } catch (error) {
       logError(`❌ Failed to connect to ${ssid}:`, error.message);
       this.connectionAttempts++;
@@ -603,124 +613,46 @@ class WifiManager {
     }
   }
 
-  // Improved Linux WiFi connection
-  async connectToWifiLinux(ssid, password) {
-    try {
-      logInfo(`📶 Attempting to connect to "${ssid}"...`);
-      
-      // Check if NetworkManager is available
-      try {
-        await this.executeCommand('which nmcli');
-      } catch (error) {
-        throw new Error('NetworkManager (nmcli) is not available');
-      }
-
-      // Ensure WiFi is enabled
-      try {
-        await this.executeCommand('nmcli radio wifi on');
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      } catch (error) {
-        logWarning(`⚠️ Could not enable WiFi radio: ${error.message}`);
-      }
-
-      // Check if we're already connected to this network
-      const currentWifi = await this.getCurrentWifiLinux();
-      if (currentWifi.ssid === ssid) {
-        logInfo(`✅ Already connected to ${ssid}`);
-        return { success: true, ssid };
-      }
-
-      // Delete existing connection if it exists (clean start)
-      try {
-        await this.executeCommand(`nmcli connection delete "${ssid}" 2>/dev/null || true`);
-        logInfo(`Cleaned up existing connection for: ${ssid}`);
-      } catch (error) {
-        // Ignore errors
-      }
-
-      // First, try the standard connection method
-      logInfo(`🔗 Method 1: Standard nmcli connect...`);
-      const escapedSsid = this.escapeSsid(ssid);
-      
-      try {
-        const { stdout, stderr } = await this.executeCommand(
-          `nmcli device wifi connect ${escapedSsid} password "${password}"`,
-          30000
-        );
-
-        if (stderr) {
-          logWarning(`⚠️ Method 1 stderr: ${stderr}`);
-          
-          if (stderr.includes('No network with SSID')) {
-            // Network might be hidden or not broadcasting SSID
-            logInfo(`🔄 Network "${ssid}" not found, trying alternative methods...`);
-            
-            // Method 2: Try with hidden network flag
-            logInfo(`🔗 Method 2: Trying as hidden network...`);
-            try {
-              const { stdout: stdout2, stderr: stderr2 } = await this.executeCommand(
-                `nmcli device wifi connect ${escapedSsid} password "${password}" hidden yes`,
-                30000
-              );
-              
-              if (!stderr2 || stdout2.includes('successfully activated')) {
-                logSuccess(`✅ Connected to hidden network: ${ssid}`);
-              } else {
-                throw new Error(`Hidden network connect failed: ${stderr2}`);
-              }
-            } catch (error2) {
-              logWarning(`Method 2 failed: ${error2.message}`);
-              
-              // Method 3: Create connection profile first
-              logInfo(`🔗 Method 3: Creating connection profile...`);
-              try {
-                // Create connection
-                await this.executeCommand(`nmcli connection add type wifi con-name "${ssid}" ssid "${ssid}"`);
-                await this.executeCommand(`nmcli connection modify "${ssid}" wifi-sec.key-mgmt wpa-psk`);
-                await this.executeCommand(`nmcli connection modify "${ssid}" wifi-sec.psk "${password}"`);
-                
-                // Activate connection
-                await this.executeCommand(`nmcli connection up "${ssid}"`);
-                
-                logSuccess(`✅ Connected via profile: ${ssid}`);
-              } catch (error3) {
-                logError(`Method 3 failed: ${error3.message}`);
-                throw new Error(`All connection methods failed for "${ssid}"`);
-              }
-            }
-          } else if (stderr.includes('Secrets were required')) {
-            throw new Error('Wrong WiFi password');
-          } else if (stderr.includes('already exists')) {
-            // Try to activate existing connection
-            await this.executeCommand(`nmcli connection up "${ssid}"`);
-          } else {
-            // Some other error, check stdout for success message
-            if (!stdout.includes('successfully activated')) {
-              throw new Error(stderr || 'Connection failed');
-            }
-          }
-        } else if (stdout.includes('successfully activated')) {
-          logSuccess(`✅ Standard connection successful: ${ssid}`);
-        }
-      } catch (error) {
-        throw new Error(`Connection failed: ${error.message}`);
-      }
-
-      // Wait for connection to stabilize
-      await new Promise(resolve => setTimeout(resolve, 8000));
-
-      // Verify connection
-      const verifyWifi = await this.getCurrentWifiLinux();
-      if (verifyWifi.ssid === ssid) {
-        logSuccess(`✅ Verified connection to: ${ssid} (signal: ${verifyWifi.signal}%)`);
-        return { success: true, ssid };
-      } else {
-        throw new Error(`Connected but verification failed. Current: ${verifyWifi.ssid || 'None'}`);
-      }
-
-    } catch (error) {
-      throw new Error(`Linux connection failed: ${error.message}`);
+  // Connection method 1: Direct connection
+  async connectMethodDirect(ssid, password) {
+    const escapedSsid = this.escapeSsid(ssid);
+    const { stdout, stderr } = await this.executeCommand(
+      `nmcli device wifi connect ${escapedSsid} password "${password}"`,
+      30000
+    );
+    
+    if (stderr && stderr.includes('No network with SSID')) {
+      throw new Error('Network not found');
     }
+    
+    return { success: !stderr || stdout.includes('successfully activated') };
+  }
+
+  // Connection method 2: Hidden network
+  async connectMethodHidden(ssid, password) {
+    const escapedSsid = this.escapeSsid(ssid);
+    const { stdout, stderr } = await this.executeCommand(
+      `nmcli device wifi connect ${escapedSsid} password "${password}" hidden yes`,
+      30000
+    );
+    
+    return { success: !stderr || stdout.includes('successfully activated') };
+  }
+
+  // Connection method 3: Create profile
+  async connectMethodProfile(ssid, password) {
+    // Clean up first
+    await this.executeCommand(`nmcli connection delete "${ssid}" 2>/dev/null || true`);
+    
+    // Create connection
+    await this.executeCommand(`nmcli connection add type wifi con-name "${ssid}" ssid "${ssid}"`);
+    await this.executeCommand(`nmcli connection modify "${ssid}" wifi-sec.key-mgmt wpa-psk`);
+    await this.executeCommand(`nmcli connection modify "${ssid}" wifi-sec.psk "${password}"`);
+    
+    // Activate
+    const { stdout, stderr } = await this.executeCommand(`nmcli connection up "${ssid}"`, 30000);
+    
+    return { success: !stderr || stdout.includes('successfully activated') };
   }
 
   // Fetch WiFi configuration from central server
@@ -826,28 +758,8 @@ class WifiManager {
   // Get current WiFi on Linux
   async getCurrentWifiLinux() {
     try {
-      // Try multiple methods to get current WiFi
-      let ssid = null;
-      
-      // Method 1: Check active connection
-      try {
-        const { stdout } = await this.executeCommand('nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2');
-        ssid = stdout.trim();
-      } catch (error) {
-        // Method 2: Check general status
-        try {
-          const { stdout } = await this.executeCommand('nmcli -t -f GENERAL.CONNECTION dev show wlan0 | cut -d: -f2');
-          ssid = stdout.trim();
-        } catch (error2) {
-          // Method 3: Check connection state
-          try {
-            const { stdout } = await this.executeCommand('nmcli -t -f NAME,TYPE connection show --active | grep wifi | cut -d: -f1');
-            ssid = stdout.trim();
-          } catch (error3) {
-            // All methods failed
-          }
-        }
-      }
+      const { stdout } = await this.executeCommand('nmcli -t -f active,ssid dev wifi | grep yes: | cut -d: -f2');
+      const ssid = stdout.trim();
       
       if (ssid && ssid !== '--') {
         const signal = await this.getWifiSignal(ssid);
@@ -858,7 +770,7 @@ class WifiManager {
           signal: signal,
           ipAddress: await this.getIpAddress(),
           state: 'connected',
-          source: ssid === this.localWifiConfig.ssid ? 'server' : 'unauthorized'
+          source: ssid === this.localWifiConfig.ssid ? 'configured' : 'other'
         };
       } else {
         return {
@@ -910,71 +822,6 @@ class WifiManager {
     }
   }
 
-  // Disconnect from WiFi
-  async disconnectWifi() {
-    try {
-      const currentWifi = await this.getCurrentWifi();
-      
-      if (currentWifi.connected) {
-        logInfo(`Disconnecting from WiFi: ${currentWifi.ssid}`);
-        
-        if (this.isLinux) {
-          // Try multiple methods
-          try {
-            await this.executeCommand(`nmcli connection down id "${currentWifi.ssid}"`);
-          } catch (error) {
-            logWarning(`First disconnect method failed: ${error.message}`);
-            try {
-              await this.executeCommand(`nmcli device disconnect wlan0`);
-            } catch (error2) {
-              logWarning(`Second disconnect method failed: ${error2.message}`);
-              try {
-                await this.executeCommand(`nmcli radio wifi off`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                await this.executeCommand(`nmcli radio wifi on`);
-              } catch (error3) {
-                logWarning(`Radio toggle failed: ${error3.message}`);
-              }
-            }
-          }
-        }
-        
-        // Verify disconnection
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        const verifyWifi = await this.getCurrentWifi();
-        
-        if (!verifyWifi.connected) {
-          logSuccess(`✅ Disconnected from WiFi: ${currentWifi.ssid}`);
-          this.currentWifiSsid = null;
-          
-          return {
-            success: true,
-            message: `Disconnected from ${currentWifi.ssid}`,
-            ssid: currentWifi.ssid
-          };
-        } else {
-          logWarning(`⚠️ Still connected to ${verifyWifi.ssid}`);
-          return {
-            success: false,
-            message: `Could not disconnect from ${currentWifi.ssid}`,
-            ssid: currentWifi.ssid
-          };
-        }
-      } else {
-        return {
-          success: true,
-          message: 'Not connected to any WiFi'
-        };
-      }
-    } catch (error) {
-      logError('Error disconnecting WiFi:', error);
-      return {
-        success: false,
-        error: error.message
-      };
-    }
-  }
-
   // Test internet connectivity
   async testInternet() {
     const testEndpoints = [
@@ -999,78 +846,38 @@ class WifiManager {
   // Main WiFi control logic
   async controlWifi() {
     try {
-      logInfo('🔄 Starting server-only WiFi control...');
+      logInfo('🔄 Starting persistent WiFi control...');
       
-      // Get current status
-      const currentWifi = await this.getCurrentWifi();
-      const hasInternet = await this.testInternet();
-      
-      logInfo(`📊 Current: WiFi=${currentWifi.ssid || 'None'}, Internet=${hasInternet}`);
-      
-      // Fetch server config
+      // Fetch server config first
       const serverConfig = await this.fetchWifiFromServer();
       
       if (serverConfig.success && serverConfig.hasConfig) {
         logInfo(`📡 Server WiFi config: ${serverConfig.ssid}`);
         
-        // Check if we're already connected to the right WiFi
-        if (currentWifi.ssid === serverConfig.ssid) {
-          logInfo(`✅ Already connected to server WiFi: ${serverConfig.ssid}`);
-          
-          if (!hasInternet) {
-            logWarning(`⚠️ Connected but no internet, will try to reconnect...`);
-            // Try to reconnect
-            const reconnectResult = await this.fetchAndApplyServerWifi();
-            if (reconnectResult.success) {
-              logSuccess(`✅ Reconnected successfully`);
-            }
-          } else {
-            // Everything is good, just save config
-            this.saveWifiConfigToFile(serverConfig.ssid, serverConfig.password, 'server');
-          }
-          return;
-        }
-        
-        // Not connected to server WiFi - try to connect
-        logInfo(`🔄 Server wants us on WiFi: ${serverConfig.ssid}`);
-        
-        // Save config first
+        // Save/update config
         this.saveWifiConfigToFile(serverConfig.ssid, serverConfig.password, 'server');
-        
-        // Try to connect to server WiFi
-        const result = await this.fetchAndApplyServerWifi();
-        
-        if (result.success) {
-          logSuccess(`✅ Successfully connected to server WiFi: ${serverConfig.ssid}`);
-        } else if (result.stayingOnCurrent) {
-          logInfo(`⚠️ Staying on current WiFi: ${result.currentSsid} (server WiFi not available)`);
-        } else {
-          logError(`❌ Failed to connect to server WiFi: ${result.error}`);
-        }
-      } else if (serverConfig.success && !serverConfig.hasConfig) {
-        // No server WiFi configured
-        logWarning('📡 No server WiFi configuration');
-        
-        // Don't disconnect if no server config - stay on current WiFi
-        if (currentWifi.connected) {
-          logInfo(`⚠️ No server WiFi config, staying on current WiFi: ${currentWifi.ssid}`);
-        }
       }
+      
+      // Execute connection strategy
+      const result = await this.executeWifiConnectionStrategy();
       
       // Get final status
       const finalWifi = await this.getCurrentWifi();
       const finalInternet = await this.testInternet();
       
-      logInfo(`📊 WiFi Control Complete: Server WiFi=${finalWifi.connected ? finalWifi.ssid : 'No'}, Internet=${finalInternet}`);
+      logInfo(`📊 WiFi Control Complete: Connected=${finalWifi.connected ? finalWifi.ssid : 'No'}, Internet=${finalInternet}`);
       
       // Reset connection attempts if successful
-      if (finalWifi.connected && finalInternet && finalWifi.source === 'server') {
+      if (finalWifi.connected && finalInternet) {
         this.connectionAttempts = 0;
       }
+      
+      return result;
       
     } catch (error) {
       logError('❌ WiFi control error:', error);
       this.connectionAttempts++;
+      return { success: false, error: error.message };
     }
   }
 
@@ -1082,19 +889,19 @@ class WifiManager {
     }
 
     this.isMonitoring = true;
-    logInfo('🚀 Starting server-only WiFi monitoring');
+    logInfo('🚀 Starting persistent WiFi monitoring');
 
-    // Initial control after 5 seconds
+    // Initial control after 3 seconds
     setTimeout(() => {
       this.controlWifi();
-    }, 5000);
+    }, 3000);
 
-    // Monitor every 60 seconds
+    // Monitor every 30 seconds for persistent retry
     this.monitorInterval = setInterval(() => {
       this.controlWifi();
-    }, 60000);
+    }, 30000);
 
-    logSuccess('✅ Server-only WiFi monitoring started (checks every 60 seconds)');
+    logSuccess('✅ Persistent WiFi monitoring started (checks every 30 seconds)');
   }
 
   // Stop WiFi monitoring
@@ -1123,7 +930,12 @@ class WifiManager {
         source: this.localWifiConfig.source,
         last_updated: this.localWifiConfig.last_updated
       },
-      policy: "Only server-configured WiFi allowed",
+      fallback_config: {
+        ssid: this.fallbackWifiSsid,
+        has_password: !!this.fallbackWifiPassword
+      },
+      connection_history: this.connectionHistory,
+      policy: "Persistent server WiFi with fallback",
       monitoring: this.getMonitoringStatus()
     };
   }
@@ -1137,9 +949,9 @@ class WifiManager {
       currentWifiSsid: this.currentWifiSsid,
       serverWifiConfigured: this.serverWifiConfigured,
       lastServerCheck: this.lastServerCheck,
-      policy: "server-only",
-      checkInterval: '60 seconds',
-      permissions: this.useSudo ? 'sudo' : 'normal'
+      policy: "persistent-retry",
+      checkInterval: '30 seconds',
+      permissions: 'sudo'
     };
   }
 }
