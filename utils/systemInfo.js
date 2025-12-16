@@ -11,21 +11,121 @@ const __dirname = path.dirname(__filename);
 
 // Path to store the permanent device ID
 const DEVICE_ID_FILE = path.join(__dirname, '../../device_id.json');
+const USERNAME_FILE = path.join(__dirname, '../../original_username.txt');
 
-// Get Raspberry Pi username
+// Get original Raspberry Pi username (works even when running as root with sudo)
 export const getRaspberryPiUsername = async () => {
   try {
-    // Try to get the username of the current user
-    const { stdout } = await execAsync('whoami');
-    const username = stdout.trim();
+    // Method 1: Check if we have saved the original username
+    if (fs.existsSync(USERNAME_FILE)) {
+      const savedUsername = fs.readFileSync(USERNAME_FILE, 'utf8').trim();
+      console.log("🔑 Using saved username from file:", savedUsername);
+      return savedUsername;
+    }
     
-    console.log("🔑 Detected Raspberry Pi username:", username);
-    return username;
+    // Method 2: Try to get original user from environment or system
+    // When running with sudo, SUDO_USER or USERNAME might contain original user
+    const possibleUsernames = [
+      process.env.SUDO_USER,      // When using sudo
+      process.env.USERNAME,       // Original Windows-style username
+      process.env.SUDO_UID,       // Could indicate original user
+      'pi',                       // Default Raspberry Pi username
+      'ubuntu',                   // Default Ubuntu username
+    ];
+    
+    // Check if any of the sudo-related env vars exist
+    for (const username of possibleUsernames) {
+      if (username && username !== 'root') {
+        console.log("🔑 Found original username from env:", username);
+        // Save it for future use
+        saveOriginalUsername(username);
+        return username;
+      }
+    }
+    
+    // Method 3: Try to get from /etc/passwd or system files
+    try {
+      // Get the first non-root user from /etc/passwd
+      const { stdout } = await execAsync('getent passwd | grep -v "root:\\|nobody:" | cut -d: -f1 | head -1');
+      const username = stdout.trim();
+      if (username && username !== 'root') {
+        console.log("🔑 Found username from /etc/passwd:", username);
+        saveOriginalUsername(username);
+        return username;
+      }
+    } catch (error) {
+      console.log("Could not get username from /etc/passwd:", error.message);
+    }
+    
+    // Method 4: Try to get home directory and extract username
+    try {
+      // Get the home directory of the original user (not /root)
+      const homeDir = process.env.HOME;
+      if (homeDir && homeDir !== '/root') {
+        const username = path.basename(homeDir);
+        if (username && username !== 'root') {
+          console.log("🔑 Extracted username from home directory:", username);
+          saveOriginalUsername(username);
+          return username;
+        }
+      }
+    } catch (error) {
+      console.log("Could not extract username from home directory:", error.message);
+    }
+    
+    // Method 5: Last resort - try to get from who am i
+    try {
+      const { stdout } = await execAsync('who am i | cut -d" " -f1');
+      const username = stdout.trim();
+      if (username && username !== 'root') {
+        console.log("🔑 Found username from 'who am i':", username);
+        saveOriginalUsername(username);
+        return username;
+      }
+    } catch (error) {
+      console.log("Could not get username from 'who am i':", error.message);
+    }
+    
+    // Method 6: Check logged in users
+    try {
+      const { stdout } = await execAsync('users | tr " " "\\n" | grep -v root | head -1');
+      const username = stdout.trim();
+      if (username) {
+        console.log("🔑 Found username from logged in users:", username);
+        saveOriginalUsername(username);
+        return username;
+      }
+    } catch (error) {
+      console.log("Could not get username from logged in users:", error.message);
+    }
+    
+    // Final fallback
+    console.log("⚠️ Could not determine original username, using fallback 'pi'");
+    const fallbackUsername = 'pi';
+    saveOriginalUsername(fallbackUsername);
+    return fallbackUsername;
+    
   } catch (error) {
-    console.error("Error getting Raspberry Pi username:", error);
+    console.error("❌ Error getting Raspberry Pi username:", error);
     
-    // Fallback to environment variable or hostname
-    return process.env.USER || process.env.USERNAME || os.userInfo().username || 'pi';
+    // Ultimate fallback
+    const fallbackUsername = 'pi';
+    saveOriginalUsername(fallbackUsername);
+    return fallbackUsername;
+  }
+};
+
+// Save the original username to file
+const saveOriginalUsername = (username) => {
+  try {
+    const dir = path.dirname(USERNAME_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(USERNAME_FILE, username);
+    console.log("💾 Saved original username to file:", username);
+  } catch (error) {
+    console.error("Error saving username:", error);
   }
 };
 
@@ -41,7 +141,7 @@ export const getDeviceId = async () => {
       }
     }
 
-    // Get Raspberry Pi username
+    // Get Raspberry Pi username (using our new method)
     const username = await getRaspberryPiUsername();
     let deviceId = '';
     let method = '';
@@ -215,7 +315,7 @@ export const getDeviceId = async () => {
     return deviceId;
     
   } catch (error) {
-    console.error("Error generating device ID:", error);
+    console.error("❌ Error generating device ID:", error);
     
     // Ultimate fallback - check if we have a stored ID from previous runs
     try {
@@ -408,7 +508,7 @@ export const getSystemInfo = async () => {
       is_raspberry_pi: isRaspberryPi
     };
   } catch (error) {
-    console.error("Error getting system info:", error);
+    console.error("❌ Error getting system info:", error);
     return {
       username: "unknown",
       mac_address: "unknown",
@@ -433,7 +533,7 @@ export const getCurrentDeviceId = () => {
       return existing.deviceId;
     }
   } catch (error) {
-    console.error("Error reading device ID file:", error);
+    console.error("❌ Error reading device ID file:", error);
   }
   return null;
 };
@@ -441,12 +541,17 @@ export const getCurrentDeviceId = () => {
 // Get current username
 export const getCurrentUsername = () => {
   try {
+    if (fs.existsSync(USERNAME_FILE)) {
+      const savedUsername = fs.readFileSync(USERNAME_FILE, 'utf8').trim();
+      return savedUsername;
+    }
+    
     if (fs.existsSync(DEVICE_ID_FILE)) {
       const existing = JSON.parse(fs.readFileSync(DEVICE_ID_FILE, 'utf8'));
       return existing.username || 'pi';
     }
   } catch (error) {
-    console.error("Error reading device info file:", error);
+    console.error("❌ Error reading device info file:", error);
   }
   return 'pi';
 };
@@ -458,7 +563,7 @@ export const getDeviceInfo = () => {
       return JSON.parse(fs.readFileSync(DEVICE_ID_FILE, 'utf8'));
     }
   } catch (error) {
-    console.error("Error reading device info file:", error);
+    console.error("❌ Error reading device info file:", error);
   }
   return null;
 };
@@ -470,7 +575,11 @@ export const resetDeviceId = () => {
       fs.unlinkSync(DEVICE_ID_FILE);
       console.log("Device ID reset - new ID will be generated on next startup");
     }
+    if (fs.existsSync(USERNAME_FILE)) {
+      fs.unlinkSync(USERNAME_FILE);
+      console.log("Username file reset");
+    }
   } catch (error) {
-    console.error("Error resetting device ID:", error);
+    console.error("❌ Error resetting device ID:", error);
   }
 };
