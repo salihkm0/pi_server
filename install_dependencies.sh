@@ -157,7 +157,7 @@ mkdir -p "$BASE_DIR/config"
 if [[ -f "$BASE_DIR/package.json" ]]; then
     print_status "Installing Node.js project dependencies..."
     cd "$BASE_DIR"
-    npm install
+    sudo npm install
 else
     print_warning "package.json not found. Node.js dependencies will be installed when you set up the project."
 fi
@@ -185,7 +185,7 @@ if [ ! -d "/home/$USERNAME/Desktop" ]; then
 exec bash /home/'"$USERNAME"'/pi_server/start_ads_display.sh
 EOF
     
-    chmod +x "/home/$USERNAME/.xinitrc"
+    sudo chmod +x "/home/$USERNAME/.xinitrc"
     
     # Enable automatic login to X server
     sudo systemctl enable lightdm
@@ -233,9 +233,11 @@ X-GNOME-Autostart-enabled=true
 EOF
 fi
 
-# Make startup script executable
+# Make startup script executable WITH sudo
 if [[ -f "$BASE_DIR/start_ads_display.sh" ]]; then
-    chmod +x "$BASE_DIR/start_ads_display.sh"
+    print_status "Making start_ads_display.sh executable..."
+    sudo chmod +x "$BASE_DIR/start_ads_display.sh"
+    print_status "✅ start_ads_display.sh is now executable"
 fi
 
 # Setup crontab for automatic startup and monitoring
@@ -259,7 +261,7 @@ cat << EOF | crontab -
 */5 * * * * pgrep -f start_ads_display.sh > /dev/null || (export DISPLAY=:0 && export XAUTHORITY=/home/$USERNAME/.Xauthority && bash $BASE_DIR/start_ads_display.sh > $BASE_DIR/logs/cron_recovery.log 2>&1)
 
 # Node.js health check (every 10 minutes)
-*/10 * * * * curl -s http://localhost:3000/health > /dev/null || (pkill -f node && sleep 5 && cd $BASE_DIR && node server.js >> $BASE_DIR/logs/node_recovery.log 2>&1 &)
+*/10 * * * * curl -s http://localhost:3000/health > /dev/null || (pkill -f node && sleep 5 && cd $BASE_DIR && sudo node server.js >> $BASE_DIR/logs/node_recovery.log 2>&1 &)
 EOF
 
 # Verify crontab setup
@@ -297,22 +299,22 @@ log "Starting health check..."
 # Check if Node.js app is running
 if ! curl -s http://localhost:3000/health > /dev/null; then
     log "Node.js app is not responding. Restarting..."
-    pkill -f "node.*server.js" || true
+    sudo pkill -f "node.*server.js" || true
     sleep 2
     cd "$BASE_DIR"
-    node server.js >> "$BASE_DIR/logs/node_restart.log" 2>&1 &
+    sudo node server.js >> "$BASE_DIR/logs/node_restart.log" 2>&1 &
     log "Node.js app restarted"
 fi
 
 # Check if MPV is running
 if ! pgrep -f mpv > /dev/null; then
     log "MPV is not running. Restarting..."
-    pkill -f mpv || true
+    sudo pkill -f mpv || true
     sleep 2
     
     # Start MPV if there are videos
     if [ -f "$BASE_DIR/ads-videos/playlist.txt" ] && [ -s "$BASE_DIR/ads-videos/playlist.txt" ]; then
-        mpv --fs --shuffle --loop-playlist=inf --osd-level=0 --no-terminal \
+        sudo -u $USERNAME mpv --fs --shuffle --loop-playlist=inf --osd-level=0 --no-terminal \
             --input-ipc-server=/tmp/mpv-socket \
             --playlist="$BASE_DIR/ads-videos/playlist.txt" \
             --keep-open=yes --no-resume-playback \
@@ -333,7 +335,7 @@ fi
 log "Health check completed"
 EOF
 
-chmod +x "$HEALTH_SCRIPT"
+sudo chmod +x "$HEALTH_SCRIPT"
 
 # Step 3: Add health check to crontab (every 10 minutes)
 print_status "Adding health check to crontab..."
@@ -348,8 +350,8 @@ echo "All crontab entries:"
 crontab -l
 echo ""
 
-# Make this installation script executable
-chmod +x "$0"
+# Make this installation script executable with sudo
+sudo chmod +x "$0"
 
 # Reload systemd
 sudo systemctl daemon-reload
@@ -380,7 +382,7 @@ fi
 echo "5. Reboot the system to start automatically: sudo reboot"
 echo ""
 print_status "To start manually:"
-echo "  bash $BASE_DIR/start_ads_display.sh"
+echo "  sudo bash $BASE_DIR/start_ads_display.sh"
 echo ""
 print_status "View crontab: crontab -l"
 print_status "View logs: tail -f $BASE_DIR/logs/health_check.log"
