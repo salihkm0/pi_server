@@ -28,6 +28,18 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Function to safely execute commands
+safe_execute() {
+    local cmd="$1"
+    print_status "Executing: $cmd"
+    if eval "$cmd"; then
+        return 0
+    else
+        print_warning "Command failed: $cmd"
+        return 1
+    fi
+}
+
 # Check if running as root
 if [[ $EUID -eq 0 ]]; then
    print_error "This script should not be run as root"
@@ -49,11 +61,11 @@ fi
 
 # Update package list
 print_status "Updating package list..."
-sudo apt update
+safe_execute "sudo apt update"
 
 # Install system dependencies
 print_status "Installing system dependencies..."
-sudo apt install -y \
+safe_execute "sudo apt install -y \
     curl \
     wget \
     git \
@@ -70,24 +82,28 @@ sudo apt install -y \
     xserver-xorg \
     xinit \
     xorg \
-    cron
+    cron"
 
 # For Lite version, install minimal X server and window manager
 if [ ! -d "/home/$USERNAME/Desktop" ]; then
     print_status "Installing X server and minimal desktop environment for Lite version..."
-    sudo apt install -y \
+    safe_execute "sudo apt install -y \
         xserver-xorg \
         xinit \
         xorg \
         openbox \
         lightdm \
-        feh
+        feh"
 fi
 
 # Install Node.js (using NodeSource repository)
 print_status "Installing Node.js..."
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt install -y nodejs
+if ! command -v node &> /dev/null; then
+    safe_execute "curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -"
+    safe_execute "sudo apt install -y nodejs"
+else
+    print_status "Node.js is already installed"
+fi
 
 # Verify Node.js installation
 node_version=$(node --version)
@@ -97,21 +113,32 @@ print_status "NPM version: $npm_version"
 
 # Install PM2 for process management
 print_status "Installing PM2..."
-sudo npm install -g pm2
+if ! command -v pm2 &> /dev/null; then
+    safe_execute "sudo npm install -g pm2"
+else
+    print_status "PM2 is already installed"
+fi
 
 # Install ngrok
 print_status "Installing ngrok..."
-curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-sudo apt update
-sudo apt install -y ngrok
+if ! command -v ngrok &> /dev/null; then
+    safe_execute "curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null"
+    safe_execute "echo 'deb https://ngrok-agent.s3.amazonaws.com buster main' | sudo tee /etc/apt/sources.list.d/ngrok.list"
+    safe_execute "sudo apt update"
+    safe_execute "sudo apt install -y ngrok"
+else
+    print_status "Ngrok is already installed"
+fi
 
-# Configure ngrok (you'll need to add your authtoken later)
 print_status "Ngrok installed. Remember to configure with: ngrok config add-authtoken <YOUR_AUTH_TOKEN>"
 
 # Install MPV media player with hardware acceleration
 print_status "Installing MPV media player with hardware acceleration..."
-sudo apt install -y mpv
+if ! command -v mpv &> /dev/null; then
+    safe_execute "sudo apt install -y mpv"
+else
+    print_status "MPV is already installed"
+fi
 
 # Configure MPV for better performance on Raspberry Pi
 print_status "Configuring MPV for Raspberry Pi optimization..."
@@ -148,31 +175,35 @@ print_status "MPV version: $mpv_version"
 
 # Create necessary directories
 print_status "Creating application directories..."
-mkdir -p "$BASE_DIR"
-mkdir -p "$BASE_DIR/ads-videos"
-mkdir -p "$BASE_DIR/logs"
-mkdir -p "$BASE_DIR/config"
+safe_execute "mkdir -p \"$BASE_DIR\""
+safe_execute "mkdir -p \"$BASE_DIR/ads-videos\""
+safe_execute "mkdir -p \"$BASE_DIR/logs\""
+safe_execute "mkdir -p \"$BASE_DIR/config\""
 
 # Set up npm in the project directory (if package.json exists)
 if [[ -f "$BASE_DIR/package.json" ]]; then
     print_status "Installing Node.js project dependencies..."
     cd "$BASE_DIR"
-    sudo npm install
+    if [ -d "node_modules" ]; then
+        print_status "Node.js dependencies already installed"
+    else
+        safe_execute "sudo npm install"
+    fi
 else
     print_warning "package.json not found. Node.js dependencies will be installed when you set up the project."
 fi
 
 # Configure NetworkManager for WiFi management
 print_status "Configuring NetworkManager..."
-sudo systemctl enable NetworkManager
-sudo systemctl start NetworkManager
+safe_execute "sudo systemctl enable NetworkManager"
+safe_execute "sudo systemctl start NetworkManager"
 
 # Add user to necessary groups
 print_status "Setting up user permissions..."
-sudo usermod -a -G audio "$USERNAME"
-sudo usermod -a -G video "$USERNAME"
-sudo usermod -a -G netdev "$USERNAME"
-sudo usermod -a -G input "$USERNAME"
+safe_execute "sudo usermod -a -G audio \"$USERNAME\""
+safe_execute "sudo usermod -a -G video \"$USERNAME\""
+safe_execute "sudo usermod -a -G netdev \"$USERNAME\""
+safe_execute "sudo usermod -a -G input \"$USERNAME\""
 
 # For Lite version: Configure automatic X server start
 if [ ! -d "/home/$USERNAME/Desktop" ]; then
@@ -185,16 +216,17 @@ if [ ! -d "/home/$USERNAME/Desktop" ]; then
 exec bash /home/'"$USERNAME"'/pi_server/start_ads_display.sh
 EOF
     
-    sudo chmod +x "/home/$USERNAME/.xinitrc"
+    safe_execute "sudo chmod +x \"/home/$USERNAME/.xinitrc\""
     
     # Enable automatic login to X server
-    sudo systemctl enable lightdm
+    safe_execute "sudo systemctl enable lightdm"
 fi
 
 # Configure automatic startup
 print_status "Setting up automatic startup..."
 
 # Create systemd service file
+print_status "Creating systemd service file..."
 sudo tee /etc/systemd/system/ads-display.service > /dev/null <<EOF
 [Unit]
 Description=ADS Display Application
@@ -221,7 +253,7 @@ EOF
 # For Desktop version, create desktop autostart entry
 if [ -d "/home/$USERNAME/Desktop" ]; then
     print_status "Creating desktop autostart entry for Desktop version..."
-    mkdir -p "/home/$USERNAME/.config/autostart"
+    safe_execute "mkdir -p \"/home/$USERNAME/.config/autostart\""
     tee "/home/$USERNAME/.config/autostart/ads-display.desktop" > /dev/null <<EOF
 [Desktop Entry]
 Type=Application
@@ -236,8 +268,10 @@ fi
 # Make startup script executable WITH sudo
 if [[ -f "$BASE_DIR/start_ads_display.sh" ]]; then
     print_status "Making start_ads_display.sh executable..."
-    sudo chmod +x "$BASE_DIR/start_ads_display.sh"
+    safe_execute "sudo chmod +x \"$BASE_DIR/start_ads_display.sh\""
     print_status "✅ start_ads_display.sh is now executable"
+else
+    print_warning "start_ads_display.sh not found at $BASE_DIR/start_ads_display.sh"
 fi
 
 # Setup crontab for automatic startup and monitoring
@@ -272,6 +306,7 @@ crontab -l
 # Create a health check script for crontab
 HEALTH_SCRIPT="$BASE_DIR/health_check.sh"
 
+print_status "Creating health check script..."
 cat > "$HEALTH_SCRIPT" << 'EOF'
 #!/bin/bash
 
@@ -335,7 +370,7 @@ fi
 log "Health check completed"
 EOF
 
-sudo chmod +x "$HEALTH_SCRIPT"
+safe_execute "sudo chmod +x \"$HEALTH_SCRIPT\""
 
 # Step 3: Add health check to crontab (every 10 minutes)
 print_status "Adding health check to crontab..."
@@ -351,17 +386,17 @@ crontab -l
 echo ""
 
 # Make this installation script executable with sudo
-sudo chmod +x "$0"
+safe_execute "sudo chmod +x \"$0\""
 
 # Reload systemd
-sudo systemctl daemon-reload
+safe_execute "sudo systemctl daemon-reload"
 
 # Enable the service
-sudo systemctl enable ads-display.service
+safe_execute "sudo systemctl enable ads-display.service"
 
 # Start cron service
-sudo systemctl enable cron
-sudo systemctl start cron
+safe_execute "sudo systemctl enable cron"
+safe_execute "sudo systemctl start cron"
 
 print_status "Installation completed successfully!"
 echo ""
