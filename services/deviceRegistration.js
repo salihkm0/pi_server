@@ -39,6 +39,10 @@ const getAppVersion = () => {
 
 // Enhanced device registration with internet check - UPDATED VERSION
 export const registerDevice = async (retries = 3) => {
+  // Debug username detection first
+  console.log("🔍 DEBUG: Starting username detection debug...");
+  await debugUsernameDetection();
+  
   // Check internet before attempting registration
   if (!await isInternetConnected()) {
     logWarning('🌐 No internet connection - skipping device registration');
@@ -75,8 +79,16 @@ export const registerDevice = async (retries = 3) => {
       const systemInfo = await getSystemInfo();
       const wifiStatus = await wifiManager.getCurrentWifi();
       
-      // CRITICAL: DO NOT include WiFi in registration payload
-      // Devices should NEVER send WiFi credentials to server
+      // DEBUG: Log what username was detected
+      logInfo(`👤 System info reports username: ${systemInfo.username}`);
+      logInfo(`👤 RPI_USERNAME constant: ${RPI_USERNAME}`);
+      
+      // If both are "pi", force a re-detection
+      if (systemInfo.username === 'pi' && RPI_USERNAME === 'pi') {
+        logWarning("⚠️ Username detection shows 'pi' - this might be incorrect!");
+        logWarning("💡 Try running: whoami");
+        logWarning("💡 Or check: ls /home/");
+      }
       
       // Convert capabilities object to array of strings
       const capabilitiesArray = [
@@ -106,6 +118,7 @@ export const registerDevice = async (retries = 3) => {
       };
 
       logInfo(`📝 Attempting device registration with ID: ${RPI_ID}, Username: ${RPI_USERNAME}, Version: ${appVersion}`);
+      logInfo(`🔍 Device ID breakdown: ${RPI_ID}`);
       
       if (wifiStatus.connected) {
         logInfo(`📡 Current WiFi: ${wifiStatus.ssid}`);
