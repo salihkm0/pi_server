@@ -16,6 +16,7 @@ export class HealthMonitor {
     this.isMonitoring = false;
     this.lastReportTime = null;
     this.serverUrl = process.env.SERVER_URL || "https://pi-central-server.onrender.com";
+    this.lastHealthData = null; // Store last health data
   }
 
   // Start health monitoring
@@ -95,13 +96,18 @@ export class HealthMonitor {
         internet_status: internetStatus
       };
 
-      return {
+      const healthData = {
         device_id: configManager.get("deviceId"),
         metrics: metrics,
         timestamp: new Date().toISOString(),
         wifi_status: wifiStatus,
         internet_status: internetStatus
       };
+
+      // Store last health data
+      this.lastHealthData = healthData;
+
+      return healthData;
 
     } catch (error) {
       logError("Error collecting health metrics:", error);
@@ -193,7 +199,7 @@ export class HealthMonitor {
     }
   }
 
-  // Send health report to central server
+  // Send health report to central server (UPDATES existing record)
   async sendHealthReport() {
     try {
       const healthData = await this.collectMetrics();
@@ -236,7 +242,7 @@ export class HealthMonitor {
 
           if (response.status === 200) {
             this.lastReportTime = new Date();
-            logSuccess(`✅ Health report sent successfully to ${endpoint}`);
+            logSuccess(`✅ Health report ${response.data.is_new ? 'created' : 'updated'} successfully on ${endpoint}`);
             reportSent = true;
             
             // Publish via MQTT if available
@@ -284,6 +290,26 @@ export class HealthMonitor {
     }
   }
 
+  // Get current health data (for API endpoint)
+  async getCurrentHealth() {
+    try {
+      if (!this.lastHealthData) {
+        // Collect fresh data if not available
+        return await this.collectMetrics();
+      }
+      return this.lastHealthData;
+    } catch (error) {
+      logError("Error getting current health:", error);
+      return null;
+    }
+  }
+
+  // Manually trigger health report
+  async triggerHealthReport() {
+    logInfo("🔄 Manually triggering health report...");
+    await this.sendHealthReport();
+  }
+
   // Get monitoring status
   getStatus() {
     return {
@@ -292,7 +318,16 @@ export class HealthMonitor {
       lastReportTime: this.lastReportTime,
       nextReportIn: this.lastReportTime ? 
         this.reportInterval - (Date.now() - this.lastReportTime.getTime()) : 
-        "unknown"
+        "unknown",
+      lastHealthData: this.lastHealthData ? {
+        device_id: this.lastHealthData.device_id,
+        timestamp: this.lastHealthData.timestamp,
+        metrics: {
+          cpu_usage: this.lastHealthData.metrics.cpu_usage,
+          memory_usage: this.lastHealthData.metrics.memory_usage,
+          disk_usage: this.lastHealthData.metrics.disk_usage
+        }
+      } : null
     };
   }
 }

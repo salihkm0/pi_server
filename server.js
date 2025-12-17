@@ -556,7 +556,7 @@ const initApp = async () => {
       logWarning("⚠️ Starting in offline mode - using local WiFi configuration");
       
       // Log current WiFi configuration
-      const wifiConfig = wifiManager.getCurrentWifiConfig();
+      const wifiConfig = wifiManager.getCurrentWifi();
       logInfo(`📡 Using local WiFi config: ${wifiConfig.ssid} (${wifiConfig.source})`);
       
       // Initialize local services even without internet

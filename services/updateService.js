@@ -216,7 +216,7 @@ class HybridUpdateService {
       logInfo("📦 Creating backup...");
       await this.createBackup(appDir, backupDir);
 
-      // Step 2: Execute Git update
+      // Step 2: Execute Git update with stash
       const updateSuccess = await this.gitUpdate(appDir, updateInfo);
 
       if (!updateSuccess) {
@@ -301,30 +301,62 @@ class HybridUpdateService {
         // Ensure we're on the correct branch
         await execAsync(`cd "${gitDir}" && git checkout main 2>/dev/null || git checkout -b main`);
         
+        // STASH LOCAL CHANGES FIRST
+        logInfo("🛡️ Stashing local changes...");
+        try {
+          await execAsync(`cd "${gitDir}" && git stash`);
+          logInfo("✅ Local changes stashed");
+        } catch (stashError) {
+          // If stash fails (no changes), that's okay
+          logInfo("No local changes to stash");
+        }
+        
         // Fetch latest changes from origin
-        logInfo("Fetching latest changes from origin...");
+        logInfo("📥 Fetching latest changes from origin...");
         await execAsync(`cd "${gitDir}" && git fetch origin`);
         
         // Reset to origin/main
-        logInfo("Resetting to origin/main...");
+        logInfo("🔄 Resetting to origin/main...");
         await execAsync(`cd "${gitDir}" && git reset --hard origin/main`);
+        
+        // Apply stashed changes back if any
+        try {
+          await execAsync(`cd "${gitDir}" && git stash pop`);
+          logInfo("✅ Stashed changes reapplied");
+        } catch (popError) {
+          // If no stashed changes, that's okay
+          logInfo("No stashed changes to apply");
+        }
         
         // If reset fails, try a different approach
       } catch (resetError) {
         logWarning("Standard reset failed, trying alternative approach:", resetError.message);
         
-        // Alternative: Clean and pull
+        // Alternative: Clean, stash, and pull
+        try {
+          await execAsync(`cd "${gitDir}" && git stash`);
+        } catch (e) {
+          logInfo("Could not stash changes");
+        }
+        
         await execAsync(`cd "${gitDir}" && git clean -fd`);
         await execAsync(`cd "${gitDir}" && git pull origin main --allow-unrelated-histories`);
+        
+        // Try to apply stash after pull
+        try {
+          await execAsync(`cd "${gitDir}" && git stash pop`);
+        } catch (e) {
+          logInfo("Could not apply stash after pull");
+        }
       }
       
       // Verify the update worked by checking the current commit
       const { stdout: gitLog } = await execAsync(`cd "${gitDir}" && git log --oneline -1`);
-      logInfo(`Latest commit: ${gitLog.trim()}`);
+      logInfo(`📝 Latest commit: ${gitLog.trim()}`);
       
       return true;
     } catch (error) {
-      logError("Git update failed:", error.message);
+      logError("❌ Git update failed:", error.message);
       
       // Provide helpful debugging info
       try {
@@ -333,6 +365,14 @@ class HybridUpdateService {
         
         const { stdout: ls } = await execAsync(`ls -la "${appDir}" 2>/dev/null || echo "Cannot list directory"`);
         logInfo(`Directory contents: ${ls}`);
+        
+        // Try to see git status for debugging
+        try {
+          const { stdout: gitStatus } = await execAsync(`cd "${appDir}" && git status --short`);
+          logInfo(`Git status: ${gitStatus || 'Clean'}`);
+        } catch (gitError) {
+          logInfo("Could not get git status");
+        }
       } catch (debugError) {
         logWarning("Debug info unavailable:", debugError.message);
       }
@@ -354,11 +394,13 @@ class HybridUpdateService {
       if (fs.existsSync(installScriptPath)) {
         logInfo("🔧 Running install_dependencies.sh...");
         
-        // Make the script executable
-        await execAsync(`chmod +x "${installScriptPath}"`);
+        // Make the script executable WITH sudo
+        await execAsync(`sudo chmod +x "${installScriptPath}"`);
+        logSuccess("✅ Made install_dependencies.sh executable");
         
-        // Run the script
-        await execAsync(`cd "${appDir}" && ./install_dependencies.sh`);
+        // Run the script with sudo
+        logInfo("🚀 Executing install_dependencies.sh with sudo...");
+        await execAsync(`cd "${appDir}" && sudo ./install_dependencies.sh`);
         logSuccess("✅ Install dependencies script completed");
       } else {
         logInfo("⚠️ No install_dependencies.sh found, skipping");
@@ -374,27 +416,29 @@ class HybridUpdateService {
     try {
       logInfo("🔄 Scheduling Raspberry Pi reboot in 1 minute...");
       
-      // Schedule reboot using at command (if available) or shutdown
-      try {
-        // Try using at command
-        await execAsync('echo "sudo reboot" | at now + 1 minute 2>/dev/null');
-        logInfo("✅ Reboot scheduled via at command");
-      } catch (atError) {
-        // Fallback to direct shutdown command
-        logInfo("Using direct shutdown command...");
-        await execAsync('sudo shutdown -r +1 "System update completed, rebooting..."');
-        logInfo("✅ Reboot scheduled via shutdown command");
-      }
-      
-      // Send final status before reboot
+      // Send notification before reboot
       this.publishUpdateStatus('reboot_scheduled', {
-        message: 'System will reboot in 1 minute',
+        message: 'System will reboot in 1 minute to complete update',
         timestamp: new Date().toISOString()
       });
+      
+      // Execute sudo reboot directly after 1 minute
+      logInfo("⏰ Reboot scheduled in 1 minute...");
+      await execAsync('sleep 60 && sudo reboot');
+      logInfo("✅ Reboot command executed");
       
     } catch (error) {
       logError("❌ Failed to schedule reboot:", error.message);
       logInfo("⚠️ Manual reboot required after update");
+      
+      // Try alternative reboot methods
+      try {
+        logInfo("Trying alternative reboot method...");
+        await execAsync('sudo shutdown -r +1 "System update completed, rebooting..."');
+        logInfo("✅ Alternative reboot scheduled");
+      } catch (altError) {
+        logError("❌ All reboot methods failed:", altError.message);
+      }
     }
   }
 
@@ -453,8 +497,8 @@ class HybridUpdateService {
     logInfo("🔄 Restarting application...");
 
     const restartMethods = [
-      () => execAsync("pm2 restart ads-display 2>/dev/null"), // PM2
-      () => execAsync("sudo systemctl restart ads-display 2>/dev/null"), // Systemd
+      () => execAsync("sudo pm2 restart ads-display 2>/dev/null"), // PM2 with sudo
+      () => execAsync("sudo systemctl restart ads-display 2>/dev/null"), // Systemd with sudo
       () => this.killAndRestart() // Fallback
     ];
 
@@ -474,7 +518,7 @@ class HybridUpdateService {
 
   async killAndRestart() {
     try {
-      await execAsync("pkill -f 'node server.js' 2>/dev/null || true");
+      await execAsync("sudo pkill -f 'node server.js' 2>/dev/null || true");
       await new Promise(resolve => setTimeout(resolve, 5000));
       
       const appDir = process.cwd();
