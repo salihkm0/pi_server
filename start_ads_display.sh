@@ -5,11 +5,31 @@
 # Compatible with both Raspberry Pi Desktop and Lite versions
 
 # Configuration - Dynamic paths based on Desktop availability
-USERNAME=$(whoami)
+# Get the correct username (handle sudo/root execution)
+if [ "$EUID" -eq 0 ]; then
+    # If running as root/sudo, try to get the original username
+    if [ -f "/home/spotus17/original_username.txt" ]; then
+        USERNAME=$(cat /home/spotus17/original_username.txt)
+    elif [ -f "/home/spotus17/device_id.json" ]; then
+        # Fallback to spotus17 if we can't determine
+        USERNAME="spotus17"
+    else
+        # Try to get from sudo environment
+        USERNAME=${SUDO_USER:-$(logname 2>/dev/null || echo "spotus17")}
+    fi
+else
+    USERNAME=$(whoami)
+fi
 
+# Save original username for future reference
+echo "$USERNAME" > "/home/spotus17/original_username.txt" 2>/dev/null || true
+
+echo "Running as user: $USERNAME"
+
+# Determine base directory
 if [ -d "/home/$USERNAME/Desktop" ]; then
     # Desktop version
-    BASE_DIR="/home/$USERNAME/Desktop/pi_server"
+    BASE_DIR="/home/$USERNAME/pi_server"
 else
     # Lite version
     BASE_DIR="/home/$USERNAME/pi_server"
@@ -19,12 +39,18 @@ VIDEO_DIR="$BASE_DIR/ads-videos"
 PLAYLIST="$VIDEO_DIR/playlist.txt"
 MPV_SOCKET="/tmp/mpv-socket"
 LOG_FILE="$BASE_DIR/logs/ads_display.log"
-NODE_APP_DIR="$BASE_DIR"  # Assuming Node.js app is in pi_server directory
+NODE_APP_DIR="$BASE_DIR"  # Node.js app is in pi_server directory
 NODE_LOG="$BASE_DIR/logs/node_app.log"
 
 # Ensure directories exist
-mkdir -p "$BASE_DIR/logs"
-mkdir -p "$VIDEO_DIR"
+mkdir -p "$BASE_DIR/logs" 2>/dev/null || sudo mkdir -p "$BASE_DIR/logs"
+mkdir -p "$VIDEO_DIR" 2>/dev/null || sudo mkdir -p "$VIDEO_DIR"
+
+# Set proper permissions
+if [ "$EUID" -eq 0 ]; then
+    sudo chown -R $USERNAME:$USERNAME "$BASE_DIR" 2>/dev/null || true
+    sudo chmod -R 755 "$BASE_DIR" 2>/dev/null || true
+fi
 
 # Redirect all output to log file
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -153,7 +179,8 @@ start_node_app() {
     # Check if package.json exists
     if [ ! -f "$NODE_APP_DIR/package.json" ]; then
         echo "Warning: package.json not found in $NODE_APP_DIR"
-        echo "Node.js application cannot start without package.json"
+        echo "Looking for package.json..."
+        ls -la "$NODE_APP_DIR/" | grep -i package
         return 1
     fi
     
@@ -163,55 +190,51 @@ start_node_app() {
     
     echo "Checking package.json for available scripts..."
     
+    # Change to app directory first
+    cd "$NODE_APP_DIR"
+    
     # Check if running in development mode
-    if grep -q '"dev"' "$NODE_APP_DIR/package.json"; then
+    if grep -q '"dev"' "package.json"; then
         echo "Starting Node.js app in development mode (npm run dev)..."
-        
-        # Change to app directory and start with sudo
-        cd "$NODE_APP_DIR"
         
         # Check if node_modules exists, if not install dependencies
         if [ ! -d "node_modules" ]; then
             echo "Installing Node.js dependencies..."
-            sudo npm install 2>&1 | tee -a "$NODE_LOG"
+            npm install 2>&1 | tee -a "$NODE_LOG"
         fi
         
-        # Start Node.js app with sudo npm run dev
-        echo "Starting: sudo npm run dev"
-        sudo npm run dev > "$NODE_LOG" 2>&1 &
+        # Start Node.js app
+        echo "Starting: npm run dev"
+        npm run dev > "$NODE_LOG" 2>&1 &
         local node_pid=$!
         
-    elif grep -q '"start"' "$NODE_APP_DIR/package.json"; then
+    elif grep -q '"start"' "package.json"; then
         echo "Starting Node.js app in production mode (npm start)..."
-        
-        cd "$NODE_APP_DIR"
         
         if [ ! -d "node_modules" ]; then
             echo "Installing Node.js dependencies..."
-            sudo npm install --production 2>&1 | tee -a "$NODE_LOG"
+            npm install --production 2>&1 | tee -a "$NODE_LOG"
         fi
         
-        echo "Starting: sudo npm start"
-        sudo npm start > "$NODE_LOG" 2>&1 &
+        echo "Starting: npm start"
+        npm start > "$NODE_LOG" 2>&1 &
         local node_pid=$!
         
     else
         echo "Warning: No start or dev script found in package.json"
-        echo "Attempting to start with: sudo node server.js or sudo node app.js"
-        
-        cd "$NODE_APP_DIR"
+        echo "Attempting to start with: node server.js or node app.js"
         
         # Try common entry points
         if [ -f "server.js" ]; then
-            sudo node server.js > "$NODE_LOG" 2>&1 &
+            node server.js > "$NODE_LOG" 2>&1 &
             local node_pid=$!
             echo "Node.js application started with PID: $node_pid (server.js)"
         elif [ -f "app.js" ]; then
-            sudo node app.js > "$NODE_LOG" 2>&1 &
+            node app.js > "$NODE_LOG" 2>&1 &
             local node_pid=$!
             echo "Node.js application started with PID: $node_pid (app.js)"
         elif [ -f "index.js" ]; then
-            sudo node index.js > "$NODE_LOG" 2>&1 &
+            node index.js > "$NODE_LOG" 2>&1 &
             local node_pid=$!
             echo "Node.js application started with PID: $node_pid (index.js)"
         else
@@ -235,40 +258,74 @@ start_node_app() {
     fi
 }
 
-# Function to update the playlist
+# Function to update the playlist with proper permissions
 update_playlist() {
     echo "Updating playlist..."
     
-    # Create playlist file if it doesn't exist
-    touch "$PLAYLIST"
+    # Ensure video directory exists
+    if [ ! -d "$VIDEO_DIR" ]; then
+        echo "Creating video directory: $VIDEO_DIR"
+        mkdir -p "$VIDEO_DIR"
+        if [ "$EUID" -eq 0 ]; then
+            chown $USERNAME:$USERNAME "$VIDEO_DIR"
+        fi
+    fi
     
-    if [[ -d "$VIDEO_DIR" ]]; then
+    # Create temporary playlist
+    TEMP_PLAYLIST="/tmp/playlist_$$.txt"
+    
+    if [[ -d "$VIDEO_DIR" ]] && [[ -r "$VIDEO_DIR" ]]; then
         # Find all video files and create playlist
-        find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" -o -name "*.webm" \) > "$PLAYLIST.tmp"
+        echo "Searching for video files in: $VIDEO_DIR"
+        find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" -o -name "*.webm" \) 2>/dev/null | sort > "$TEMP_PLAYLIST"
 
-        # Remove empty lines and sort
-        grep -v '^$' "$PLAYLIST.tmp" | sort > "$PLAYLIST"
-        rm -f "$PLAYLIST.tmp"
-
-        local video_count=$(wc -l < "$PLAYLIST" 2>/dev/null || echo 0)
-        echo "Playlist updated: $video_count videos found."
+        local video_count=$(wc -l < "$TEMP_PLAYLIST" 2>/dev/null || echo 0)
+        echo "Found $video_count videos in $VIDEO_DIR"
 
         if [[ $video_count -gt 0 ]]; then
-            echo "Videos in playlist:"
-            cat "$PLAYLIST"
+            echo "Videos found:"
+            cat "$TEMP_PLAYLIST"
+            
+            # Copy to final playlist with proper permissions
+            if [ "$EUID" -eq 0 ]; then
+                sudo cp "$TEMP_PLAYLIST" "$PLAYLIST"
+                sudo chown $USERNAME:$USERNAME "$PLAYLIST"
+                sudo chmod 644 "$PLAYLIST"
+            else
+                cp "$TEMP_PLAYLIST" "$PLAYLIST"
+                chmod 644 "$PLAYLIST"
+            fi
         else
             echo "Warning: No video files found in $VIDEO_DIR"
             echo "Supported formats: mp4, avi, mkv, mov, webm"
-            echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
+            echo "# Empty playlist - waiting for videos" > "$TEMP_PLAYLIST"
+            
+            if [ "$EUID" -eq 0 ]; then
+                sudo cp "$TEMP_PLAYLIST" "$PLAYLIST"
+                sudo chown $USERNAME:$USERNAME "$PLAYLIST"
+                sudo chmod 644 "$PLAYLIST"
+            else
+                cp "$TEMP_PLAYLIST" "$PLAYLIST"
+                chmod 644 "$PLAYLIST"
+            fi
         fi
     else
-        echo "Video directory not found: $VIDEO_DIR"
-        mkdir -p "$VIDEO_DIR"
-        echo "Created video directory: $VIDEO_DIR"
-        echo "# Empty playlist - waiting for videos" > "$PLAYLIST"
+        echo "Video directory not accessible: $VIDEO_DIR"
+        echo "# Empty playlist - waiting for videos" > "$TEMP_PLAYLIST"
+        
+        if [ "$EUID" -eq 0 ]; then
+            sudo cp "$TEMP_PLAYLIST" "$PLAYLIST"
+            sudo chown $USERNAME:$USERNAME "$PLAYLIST"
+            sudo chmod 644 "$PLAYLIST"
+        else
+            cp "$TEMP_PLAYLIST" "$PLAYLIST"
+            chmod 644 "$PLAYLIST"
+        fi
     fi
     
-    chmod 644 "$PLAYLIST"
+    # Clean up temp file
+    rm -f "$TEMP_PLAYLIST"
+    
     echo "Playlist file created/updated: $PLAYLIST"
 }
 
@@ -293,7 +350,7 @@ force_reload_playlist() {
     fi
 }
 
-# OPTIMIZED MPV startup - NO LAG - UPDATED WITH YOUR EXACT CONFIGURATION
+# OPTIMIZED MPV startup - NO LAG
 start_mpv() {
     echo "Starting MPV playback..."
     
@@ -331,20 +388,41 @@ start_mpv() {
     
     echo "Starting MPV with optimized configuration..."
     
-    # YOUR EXACT MPV CONFIGURATION - UPDATED WITH --no-keepaspect
-    mpv --fs \
-        --shuffle \
-        --loop-playlist=inf \
-        --no-terminal \
-        --osd-level=0 \
-        --input-ipc-server="$MPV_SOCKET" \
-        --playlist="$PLAYLIST" \
-        --keep-open=yes \
-        --no-resume-playback \
-        --hwdec=auto \
-        --vo=xv \
-        --no-keepaspect \
-        --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
+    # Change to video directory to avoid path issues
+    cd "$VIDEO_DIR"
+    
+    # Start MPV with proper user
+    if [ "$EUID" -eq 0 ]; then
+        # If running as root, use sudo -u to run as the correct user
+        sudo -u $USERNAME mpv --fs \
+            --shuffle \
+            --loop-playlist=inf \
+            --no-terminal \
+            --osd-level=0 \
+            --input-ipc-server="$MPV_SOCKET" \
+            --playlist="$PLAYLIST" \
+            --keep-open=yes \
+            --no-resume-playback \
+            --hwdec=auto \
+            --vo=xv \
+            --no-keepaspect \
+            --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
+    else
+        # Run as current user
+        mpv --fs \
+            --shuffle \
+            --loop-playlist=inf \
+            --no-terminal \
+            --osd-level=0 \
+            --input-ipc-server="$MPV_SOCKET" \
+            --playlist="$PLAYLIST" \
+            --keep-open=yes \
+            --no-resume-playback \
+            --hwdec=auto \
+            --vo=xv \
+            --no-keepaspect \
+            --quiet > "$BASE_DIR/logs/mpv.log" 2>&1 &
+    fi
     
     local mpv_pid=$!
     
@@ -377,6 +455,12 @@ start_mpv() {
 monitor_directory() {
     echo "Monitoring $VIDEO_DIR for changes..."
     
+    # Ensure we have permission to monitor
+    if [ ! -r "$VIDEO_DIR" ]; then
+        echo "Warning: Cannot read video directory: $VIDEO_DIR"
+        return 1
+    fi
+    
     # Check if inotifywait is available
     if ! command -v inotifywait &> /dev/null; then
         echo "Warning: inotifywait not available. Directory monitoring disabled."
@@ -400,30 +484,25 @@ monitor_directory() {
     while true; do
         echo "Starting directory monitor..."
 
-        inotifywait -r -e create -e modify -e moved_to -e close_write --format '%w%f' "$VIDEO_DIR" 2>/dev/null | while read -r file; do
+        inotifywait -r -e create -e modify -e moved_to -e delete --exclude '.*\.tmp$' --format '%w%f' "$VIDEO_DIR" 2>/dev/null | while read -r file; do
             echo "File change detected: $file"
 
-            # Check if it's a video file
-            if [[ "$file" =~ \.(mp4|avi|mkv|mov|webm)$ ]]; then
-                echo "Video file detected: $file"
+            # Check if it's a video file or the playlist itself
+            if [[ "$file" =~ \.(mp4|avi|mkv|mov|webm|txt)$ ]]; then
+                echo "Video or playlist file changed: $(basename "$file")"
 
-                # Wait for file to be completely written
-                sleep 5
+                # Wait for file operations to complete
+                sleep 2
 
-                # Check if file is readable and has content
-                if [[ -f "$file" ]] && [[ -r "$file" ]] && [[ -s "$file" ]]; then
-                    echo "File is ready: $file"
+                # Update playlist
+                update_playlist
 
-                    # Update playlist
-                    update_playlist
-
-                    # Reload MPV playlist
+                # Reload MPV playlist if MPV is running
+                if pgrep mpv > /dev/null; then
                     force_reload_playlist
-
-                    echo "Playlist updated with new video: $(basename "$file")"
-                else
-                    echo "File not ready or empty: $file"
                 fi
+
+                echo "Playlist updated after file change"
             fi
         done
 
@@ -440,14 +519,16 @@ start_periodic_playlist_refresh() {
         sleep 300  # 5 minutes
 
         # Check if videos directory exists and has files
-        if [[ -d "$VIDEO_DIR" ]]; then
-            local current_count=$(find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" -o -name "*.webm" \) | wc -l)
+        if [[ -d "$VIDEO_DIR" ]] && [[ -r "$VIDEO_DIR" ]]; then
+            local current_count=$(find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" -o -name "*.webm" \) 2>/dev/null | wc -l)
             local playlist_count=$(wc -l < "$PLAYLIST" 2>/dev/null || echo 0)
 
             if [[ $current_count -ne $playlist_count ]]; then
                 echo "Playlist count mismatch (files: $current_count, playlist: $playlist_count). Updating..."
                 update_playlist
-                force_reload_playlist
+                if pgrep mpv > /dev/null; then
+                    force_reload_playlist
+                fi
             fi
         fi
     done &
@@ -471,6 +552,16 @@ monitor_node_app() {
             start_node_app
         fi
     done &
+}
+
+# Function to check if MPV is really playing
+check_mpv_playing() {
+    if [ -S "$MPV_SOCKET" ] && command -v socat > /dev/null 2>&1; then
+        # Check if MPV is responding
+        echo '{ "command": ["get_property", "pause"] }' | socat - "$MPV_SOCKET" 2>/dev/null | grep -q '"data":false'
+        return $?
+    fi
+    return 1
 }
 
 # Main startup sequence
@@ -499,7 +590,6 @@ main() {
     else
         echo "X server not available - video playback disabled"
         echo "Check X server configuration and restart"
-        # Don't return here, let Node.js app continue running
     fi
     
     # Monitor directory for changes (run in background)
@@ -516,40 +606,36 @@ main() {
     echo "User: $USERNAME"
     echo "Base Directory: $BASE_DIR"
     echo "Time: $(date)"
-    echo "Node.js Application: RUNNING"
-    echo "Playlist monitoring: ACTIVE"
-    echo "Periodic refresh: EVERY 5 MINUTES"
+    echo "Node.js Application: $(pgrep -f "node.*$NODE_APP_DIR" > /dev/null && echo "RUNNING" || echo "NOT RUNNING")"
+    echo "MPV Playback: $(pgrep mpv > /dev/null && echo "RUNNING" || echo "NOT RUNNING")"
     echo "Video directory: $VIDEO_DIR"
+    echo "Videos found: $(find "$VIDEO_DIR" -type f \( -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" -o -name "*.webm" \) 2>/dev/null | wc -l)"
     echo "=========================================="
     echo "Node.js log: $NODE_LOG"
     echo "System log: $LOG_FILE"
     echo "=========================================="
     
-    # Keep script running and monitor MPV process
+    # Main monitoring loop
     while true; do
-        # Check if MPV is still running (if it was started)
-        if pgrep -f mpv > /dev/null 2>&1; then
-            # MPV is running, check if it's still responsive
-            if [ -S "$MPV_SOCKET" ]; then
-                # Everything is fine
-                :
-            else
-                echo "Warning: MPV socket not found but process exists. Checking..."
-                # Wait a bit and check again
+        # Check if MPV should be running
+        if is_xserver_running; then
+            # Check if MPV is running
+            if ! pgrep mpv > /dev/null 2>&1; then
+                echo "MPV not running but X server is available. Restarting MPV..."
+                start_mpv
+            elif ! check_mpv_playing; then
+                # MPV is running but might be stuck
+                echo "MPV might be stuck. Checking status..."
                 sleep 5
-                if [ ! -S "$MPV_SOCKET" ]; then
-                    echo "MPV may be hung. Restarting..."
+                if ! check_mpv_playing; then
+                    echo "MPV appears stuck. Restarting..."
                     start_mpv
                 fi
             fi
-        elif is_xserver_running; then
-            # X server is running but MPV is not, restart it
-            echo "MPV not running but X server is available. Restarting MPV..."
-            start_mpv
         fi
         
         # Reduce monitoring frequency to save CPU
-        sleep 30
+        sleep 60
     done
 }
 
